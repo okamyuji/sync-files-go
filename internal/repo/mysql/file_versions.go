@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -103,17 +104,20 @@ type PrunableVersion struct {
 }
 
 // FindPrunable 90 日経過 + 非 current + 未削除フラグの旧版候補をリストする。
+//
+// 閾値は Go 側で計算して `?` で渡す（INTERVAL プレースホルダのタイムゾーン解釈ばらつき回避）。
 func (r *FileVersionsRepo) FindPrunable(ctx context.Context, olderThanDays int, limit int) ([]PrunableVersion, error) {
+	threshold := time.Now().UTC().Add(-time.Duration(olderThanDays) * 24 * time.Hour)
 	q := `
 SELECT fv.id_bin, fv.file_id_bin, fv.storage_key
   FROM file_versions fv
   JOIN files f ON f.id_bin = fv.file_id_bin
- WHERE fv.created_at < NOW(6) - INTERVAL ? DAY
+ WHERE fv.created_at < ?
    AND fv.id_bin <> COALESCE(f.current_version_id_bin, X'00000000000000000000000000000000')
    AND fv.deleted_by_user = 0
  ORDER BY fv.created_at ASC
  LIMIT ?`
-	rows, err := r.router.Writer(ctx).QueryContext(ctx, q, olderThanDays, limit)
+	rows, err := r.router.Writer(ctx).QueryContext(ctx, q, threshold, limit)
 	if err != nil {
 		return nil, err
 	}

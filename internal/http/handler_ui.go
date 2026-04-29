@@ -179,12 +179,201 @@ func signupPostFormHandler(d *Deps) http.HandlerFunc {
 	}
 }
 
+// requireUser auth-required な handler 共通の前処理。
+// セッションが無いか、user 行が引けないなら適切な応答を出して (sess, nil, false) を返す。
+func requireUser(d *Deps, w http.ResponseWriter, r *http.Request) (middleware.UserSession, *mysql.User, bool) {
+	sess, ok := middleware.SessionFrom(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return sess, nil, false
+	}
+	u, err := d.Users.FindByID(r.Context(), sess.UserID)
+	if err != nil {
+		internalError(w, d, r.Context(), "find user", err)
+		return sess, nil, false
+	}
+	return sess, u, true
+}
+
+// currentUserView ヘッダ表示用の最小ビュー。
+func currentUserView(u *mysql.User) *ui.CurrentUser {
+	return &ui.CurrentUser{ID: u.ID.String(), Email: u.Email}
+}
+
+// trashPageHandler GET /trash。ゴミ箱ファイル一覧を表示する。
+func trashPageHandler(d *Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess, u, ok := requireUser(d, w, r)
+		if !ok {
+			return
+		}
+		files, err := d.Files.ListTrashedByOwner(r.Context(), sess.UserID, 100, 0)
+		if err != nil {
+			internalError(w, d, r.Context(), "list trashed", err)
+			return
+		}
+		_ = d.UI.Render(w, r, http.StatusOK, "trash", &ui.PageData{
+			Title:       "ゴミ箱",
+			CurrentUser: currentUserView(u),
+			Extra:       map[string]any{"Files": fileSummaries(files)},
+		})
+	}
+}
+
+// shareLinksPageHandler GET /share-links。発行済み公開リンクの管理画面。
+func shareLinksPageHandler(d *Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess, u, ok := requireUser(d, w, r)
+		if !ok {
+			return
+		}
+		links, err := d.ShareLinks.ListActiveByOwner(r.Context(), sess.UserID, 100, 0)
+		if err != nil {
+			internalError(w, d, r.Context(), "list share links", err)
+			return
+		}
+		rows := make([]map[string]any, 0, len(links))
+		for _, l := range links {
+			rows = append(rows, map[string]any{
+				"id":             l.Link.ID.String(),
+				"file_name":      l.FileName,
+				"file_path":      l.FilePath,
+				"file_id":        l.Link.FileID.String(),
+				"expires_at":     l.Link.ExpiresAt.UTC().Format(time.RFC3339Nano),
+				"view_count":     l.Link.ViewCount,
+				"download_count": l.Link.DownloadCount,
+				"has_password":   l.Link.PasswordHash != "",
+			})
+		}
+		_ = d.UI.Render(w, r, http.StatusOK, "share_links", &ui.PageData{
+			Title:       "共有リンク",
+			CurrentUser: currentUserView(u),
+			Extra:       map[string]any{"Links": rows},
+		})
+	}
+}
+
+// activityPageHandler GET /activity。監査ログから自分の操作履歴をタイムラインで見せる。
+func activityPageHandler(d *Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess, u, ok := requireUser(d, w, r)
+		if !ok {
+			return
+		}
+		entries, err := d.Audit.ListByActor(r.Context(), sess.UserID, 200, 0)
+		if err != nil {
+			internalError(w, d, r.Context(), "list audit", err)
+			return
+		}
+		rows := make([]map[string]any, 0, len(entries))
+		for _, e := range entries {
+			rows = append(rows, map[string]any{
+				"action":      e.Action,
+				"action_ja":   actionLabelJA(e.Action),
+				"target_kind": e.TargetKind,
+				"occurred_at": e.OccurredAt.UTC().Format(time.RFC3339Nano),
+			})
+		}
+		_ = d.UI.Render(w, r, http.StatusOK, "activity", &ui.PageData{
+			Title:       "アクティビティ",
+			CurrentUser: currentUserView(u),
+			Extra:       map[string]any{"Entries": rows},
+		})
+	}
+}
+
+// settingsPageHandler GET /settings。最低限の表示（v1: メールアドレスとログアウトリンク）。
+func settingsPageHandler(d *Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, u, ok := requireUser(d, w, r)
+		if !ok {
+			return
+		}
+		_ = d.UI.Render(w, r, http.StatusOK, "settings", &ui.PageData{
+			Title:       "設定",
+			CurrentUser: currentUserView(u),
+			Extra:       map[string]any{"Email": u.Email, "TOTPEnabled": u.TOTPEnabled},
+		})
+	}
+}
+
+// sharePageHandler GET /share/{token}。公開リンクの未認証ランディングページ。
+//
+// 既存の publicShareDownloadHandler は Accept: */* やヘッダ無しのときに直接ファイルを返す。
+// ここではブラウザ来訪時 (Accept: text/html) に「ファイル名 + サイズ + ダウンロードボタン」のページを表示する。
+func sharePageHandler(d *Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := r.PathValue("token")
+		if token == "" {
+			http.NotFound(w, r)
+			return
+		}
+		// Accept ヘッダで HTML 要求でなければ既存の直接ダウンロードに委譲（curl 等の互換）。
+		if !strings.Contains(r.Header.Get("Accept"), "text/html") {
+			publicShareDownloadHandler(d).ServeHTTP(w, r)
+			return
+		}
+		ctx := r.Context()
+		s, err := resolveShareLink(ctx, d, token)
+		if err != nil {
+			emitShareError(w, d, ctx, err)
+			return
+		}
+		f, _, _, err := loadShareTarget(ctx, d, s)
+		if err != nil {
+			emitShareError(w, d, ctx, err)
+			return
+		}
+		_ = d.ShareLinks.IncrementViewCount(ctx, s.ID)
+		_ = d.UI.Render(w, r, http.StatusOK, "share", &ui.PageData{
+			Title: f.Name,
+			Extra: map[string]any{
+				"FileName":      f.Name,
+				"SizeBytes":     f.SizeBytes,
+				"ContentType":   contentTypeOrDefault(f.ContentType),
+				"DownloadURL":   "/share/" + token,
+				"HasPassword":   s.PasswordHash != "",
+				"ExpiresAt":     s.ExpiresAt.UTC().Format(time.RFC3339Nano),
+				"DownloadCount": s.DownloadCount,
+			},
+		})
+	}
+}
+
+// actionLabelJA audit_logs.action を日本語ラベルに写像。テンプレ側で見やすくするためのヘルパ。
+func actionLabelJA(action string) string {
+	switch action {
+	case "auth.signup":
+		return "アカウント作成"
+	case "auth.login":
+		return "ログイン"
+	case "auth.login_failure":
+		return "ログイン失敗"
+	case "auth.logout":
+		return "ログアウト"
+	case "file.upload":
+		return "ファイルをアップロード"
+	case "file.update":
+		return "ファイルを更新"
+	case "file.delete":
+		return "ファイルを削除"
+	case "file.restore":
+		return "ファイルを復元"
+	case "share.create":
+		return "公開リンクを発行"
+	case "share.revoke":
+		return "公開リンクを取り消し"
+	case "share.download":
+		return "公開リンクからダウンロード"
+	}
+	return action
+}
+
 // homePageHandler 認証済みユーザのホーム画面。`/api/files` の listFilesHandler と同じ表示を HTML で返す。
 func homePageHandler(d *Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sess, ok := middleware.SessionFrom(r.Context())
+		sess, u, ok := requireUser(d, w, r)
 		if !ok {
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
 		files, err := d.Files.ListActiveByOwner(r.Context(), sess.UserID, 100, 0)
@@ -192,14 +381,9 @@ func homePageHandler(d *Deps) http.HandlerFunc {
 			internalError(w, d, r.Context(), "list files", err)
 			return
 		}
-		u, err := d.Users.FindByID(r.Context(), sess.UserID)
-		if err != nil {
-			internalError(w, d, r.Context(), "find user", err)
-			return
-		}
 		_ = d.UI.Render(w, r, http.StatusOK, "home", &ui.PageData{
 			Title:       "ホーム",
-			CurrentUser: &ui.CurrentUser{ID: u.ID.String(), Email: u.Email},
+			CurrentUser: currentUserView(u),
 			Extra:       map[string]any{"Files": fileSummaries(files)},
 		})
 	}

@@ -1,0 +1,36 @@
+{{- /* settings  設定画面。v1 はメールアドレス + 2FA 状態 + ログアウトリンク。 */ -}}
+{{- define "content" -}}
+<div class="app">
+  {{ template "partials/header" . }}
+  <div class="app-shell">
+    {{ template "partials/sidebar" . }}
+    <main class="app-main" id="main">
+      <header class="section-head">
+        <h1 class="section-title">設定</h1>
+        <p class="section-sub">アカウントとセキュリティ。</p>
+      </header>
+
+      <section class="auth-card" style="max-width: 640px; margin: 0;">
+        <h2 class="auth-title" style="font-size: var(--text-lg);">アカウント</h2>
+        <dl class="dl">
+          <dt style="color: var(--color-text-muted); font-size: var(--text-sm);">メールアドレス</dt>
+          <dd style="margin: 0 0 var(--space-3); font-family: var(--font-mono); font-size: var(--text-sm);">{{ .Extra.Email }}</dd>
+          <dt style="color: var(--color-text-muted); font-size: var(--text-sm);">2 段階認証 (TOTP)</dt>
+          <dd style="margin: 0 0 var(--space-3);">
+            {{- if .Extra.TOTPEnabled }}
+              <span class="badge badge-success">有効</span>
+            {{- else }}
+              <span class="badge">未設定</span>
+              <span style="color: var(--color-text-muted); font-size: var(--text-xs); margin-left: var(--space-2);">v1.x で設定 UI を追加予定</span>
+            {{- end }}
+          </dd>
+        </dl>
+
+        <div style="margin-top: var(--space-6); padding-top: var(--space-4); border-top: 1px solid var(--color-border); display: flex; justify-content: flex-end;">
+          <a class="btn btn-danger" href="/logout" data-logout>ログアウト</a>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+{{- end -}}

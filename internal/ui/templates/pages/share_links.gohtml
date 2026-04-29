@@ -1,0 +1,65 @@
+{{- /* share_links  発行済み公開リンク管理画面。 */ -}}
+{{- define "content" -}}
+<div class="app">
+  {{ template "partials/header" . }}
+  <div class="app-shell">
+    {{ template "partials/sidebar" . }}
+    <main class="app-main" id="main">
+      <header class="file-toolbar">
+        <div>
+          <h1 class="file-toolbar-title">共有リンク</h1>
+          <p class="file-toolbar-meta">発行済みの公開リンクを管理します（v1：期限 1 時間 / 1 日 / 7 日のみ）。</p>
+        </div>
+      </header>
+
+      {{- if and .Extra .Extra.Links (gt (len .Extra.Links) 0) }}
+        <table class="file-table" aria-label="発行済み共有リンク一覧">
+          <thead>
+            <tr>
+              <th scope="col">ファイル</th>
+              <th scope="col">期限</th>
+              <th scope="col">表示</th>
+              <th scope="col">DL</th>
+              <th scope="col">パスワード</th>
+              <th scope="col" class="file-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{- range .Extra.Links }}
+              <tr id="share-{{ .id }}" data-share-id="{{ .id }}">
+                <td>
+                  <a class="file-name" href="/files/{{ .file_id }}">
+                    <svg class="file-name-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 13a5 5 0 0 1 7 0l3-3a5 5 0 0 0-7-7l-2 2"/><path d="M14 11a5 5 0 0 1-7 0l-3 3a5 5 0 0 0 7 7l2-2"/></svg>
+                    {{ .file_name }}
+                  </a>
+                </td>
+                <td class="file-meta"><time datetime="{{ .expires_at }}">{{ .expires_at }}</time></td>
+                <td class="file-meta">{{ .view_count }}</td>
+                <td class="file-meta">{{ .download_count }}</td>
+                <td class="file-meta">
+                  {{- if .has_password }}
+                    <span class="badge badge-accent">あり</span>
+                  {{- else }}
+                    <span class="badge">なし</span>
+                  {{- end }}
+                </td>
+                <td class="file-actions">
+                  <button class="btn btn-danger btn-sm" type="button"
+                          hx-delete="/api/share-links/{{ .id }}"
+                          hx-confirm="この共有リンクを取り消しますか？"
+                          hx-target="#share-{{ .id }}"
+                          hx-swap="outerHTML">
+                    取り消し
+                  </button>
+                </td>
+              </tr>
+            {{- end }}
+          </tbody>
+        </table>
+      {{- else }}
+        {{ template "partials/empty_state" (dict "title" "共有リンクはまだありません" "body" "ホームのファイルから「共有リンクを発行」を選ぶと、ここに表示されます。") }}
+      {{- end }}
+    </main>
+  </div>
+</div>
+{{- end -}}

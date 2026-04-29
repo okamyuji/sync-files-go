@@ -1,0 +1,37 @@
+{{- /* share  公開リンクの未認証ランディングページ。
+        パスワード保護があれば、初回は password 入力フォームを出す（X-Share-Password ヘッダで再アクセス）。 */ -}}
+{{- define "content" -}}
+<main class="auth-shell">
+  <section class="auth-card" aria-labelledby="share-title">
+    <h1 id="share-title" class="auth-title" style="word-break: break-all;">{{ .Extra.FileName }}</h1>
+    <p class="auth-subtitle">
+      {{ formatBytes .Extra.SizeBytes }} ・ <span title="{{ .Extra.ContentType }}">{{ .Extra.ContentType }}</span>
+    </p>
+
+    <dl class="dl" style="font-size: var(--text-sm); color: var(--color-text-muted);">
+      <dt>有効期限</dt>
+      <dd><time datetime="{{ .Extra.ExpiresAt }}">{{ .Extra.ExpiresAt }}</time></dd>
+      <dt>ダウンロード数</dt>
+      <dd>{{ .Extra.DownloadCount }}</dd>
+    </dl>
+
+    {{- if .Extra.HasPassword }}
+      <div class="notif" data-kind="warn" role="status" style="margin: var(--space-4) 0;">
+        このリンクはパスワードで保護されています。パスワードはリンク発行者に確認してください。
+      </div>
+      <p class="field-hint" style="margin-bottom: var(--space-4);">
+        パスワードを <code>X-Share-Password</code> ヘッダに付けて
+        <code>{{ .Extra.DownloadURL }}</code> に GET してください（v1 では UI 入力 UI なし、curl/拡張機能で）。
+      </p>
+    {{- else }}
+      <a class="btn btn-primary btn-block" href="{{ .Extra.DownloadURL }}/download" download="{{ .Extra.FileName }}" style="margin-top: var(--space-4);">
+        ダウンロード
+      </a>
+    {{- end }}
+
+    <div class="auth-foot">
+      sync-files-go の公開リンク
+    </div>
+  </section>
+</main>
+{{- end -}}

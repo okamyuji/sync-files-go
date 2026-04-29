@@ -71,6 +71,68 @@ func (r *ShareLinksRepo) RevokeByFile(ctx context.Context, fileID uuid.UUID, whe
 	return err
 }
 
+// ListActiveByOwner 発行済み公開リンク管理画面用。created_by が一致し、未取り消し・未期限切れのみ。
+//
+// `domain.ShareLink` の他に file の path / name も同時に取りたいので JOIN する。
+// 戻り値は ShareLink 本体と *FileSummary を並列の slice で返す。
+func (r *ShareLinksRepo) ListActiveByOwner(ctx context.Context, ownerID uuid.UUID, limit, offset int) ([]ShareLinkWithFile, error) {
+	const q = `
+SELECT s.id_bin, s.file_id_bin, s.created_by_bin, s.token_hash, s.password_hash,
+       s.expires_at, s.created_at, s.revoked_at, s.view_count, s.download_count,
+       f.name, f.path
+FROM share_links s
+JOIN files f ON f.id_bin = s.file_id_bin
+WHERE s.created_by_bin = ? AND s.revoked_at IS NULL AND s.expires_at > ?
+ORDER BY s.created_at DESC
+LIMIT ? OFFSET ?
+`
+	rows, err := r.router.Writer(ctx).QueryContext(ctx, q, uuidToBin(ownerID), time.Now().UTC(), limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]ShareLinkWithFile, 0)
+	for rows.Next() {
+		var (
+			s         domain.ShareLink
+			idBin     []byte
+			fileBin   []byte
+			createdBy []byte
+			pwHash    sql.NullString
+			revoked   sql.NullTime
+			fileName  string
+			filePath  string
+		)
+		if err := rows.Scan(
+			&idBin, &fileBin, &createdBy, &s.TokenHash, &pwHash,
+			&s.ExpiresAt, &s.CreatedAt, &revoked, &s.ViewCount, &s.DownloadCount,
+			&fileName, &filePath,
+		); err != nil {
+			return nil, err
+		}
+		s.ID, _ = binToUUID(idBin)
+		s.FileID, _ = binToUUID(fileBin)
+		s.CreatedBy, _ = binToUUID(createdBy)
+		if pwHash.Valid {
+			s.PasswordHash = pwHash.String
+		}
+		if revoked.Valid {
+			t := revoked.Time
+			s.RevokedAt = &t
+		}
+		out = append(out, ShareLinkWithFile{Link: s, FileName: fileName, FilePath: filePath})
+	}
+	return out, rows.Err()
+}
+
+// ShareLinkWithFile 一覧表示用の集約。テンプレート側に渡す形。
+type ShareLinkWithFile struct {
+	Link     domain.ShareLink
+	FileName string
+	FilePath string
+}
+
 // IncrementViewCount アクセス時の集計。
 func (r *ShareLinksRepo) IncrementViewCount(ctx context.Context, id uuid.UUID) error {
 	_, err := r.router.Writer(ctx).ExecContext(ctx, `UPDATE share_links SET view_count = view_count + 1 WHERE id_bin = ?`, uuidToBin(id))

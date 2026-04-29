@@ -1,0 +1,52 @@
+{{- /* trash  ゴミ箱画面：30 日以内なら復元可。 */ -}}
+{{- define "content" -}}
+<div class="app">
+  {{ template "partials/header" . }}
+  <div class="app-shell">
+    {{ template "partials/sidebar" . }}
+    <main class="app-main" id="main">
+      <header class="file-toolbar">
+        <div>
+          <h1 class="file-toolbar-title">ゴミ箱</h1>
+          <p class="file-toolbar-meta">削除から 30 日以内に復元できます。30 日経過後はバッチで物理削除されます。</p>
+        </div>
+      </header>
+
+      {{- if and .Extra .Extra.Files (gt (len .Extra.Files) 0) }}
+        <table class="file-table" aria-label="ゴミ箱のファイル一覧">
+          <thead>
+            <tr>
+              <th scope="col">名前</th>
+              <th scope="col">サイズ</th>
+              <th scope="col">削除日時</th>
+              <th scope="col" class="file-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{- range .Extra.Files }}
+              <tr id="trash-{{ .id }}" data-file-id="{{ .id }}">
+                <td><span class="file-name">
+                  <svg class="file-name-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
+                  {{ .name }}
+                </span></td>
+                <td class="file-meta">{{ formatBytes .size_bytes }}</td>
+                <td class="file-meta"><time datetime="{{ .updated_at }}">{{ .updated_at }}</time></td>
+                <td class="file-actions">
+                  <button class="btn btn-secondary btn-sm" type="button"
+                          hx-post="/api/files/{{ .id }}/restore"
+                          hx-target="#trash-{{ .id }}"
+                          hx-swap="outerHTML">
+                    復元
+                  </button>
+                </td>
+              </tr>
+            {{- end }}
+          </tbody>
+        </table>
+      {{- else }}
+        {{ template "partials/empty_state" (dict "title" "ゴミ箱は空です" "body" "削除したファイルはここに 30 日間保管されます。") }}
+      {{- end }}
+    </main>
+  </div>
+</div>
+{{- end -}}

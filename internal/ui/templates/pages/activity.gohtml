@@ -1,0 +1,30 @@
+{{- /* activity  監査ログから自分の操作履歴をタイムライン表示する。 */ -}}
+{{- define "content" -}}
+<div class="app">
+  {{ template "partials/header" . }}
+  <div class="app-shell">
+    {{ template "partials/sidebar" . }}
+    <main class="app-main" id="main">
+      <header class="section-head">
+        <h1 class="section-title">アクティビティ</h1>
+        <p class="section-sub">最新 200 件まで表示します。</p>
+      </header>
+
+      {{- if and .Extra .Extra.Entries (gt (len .Extra.Entries) 0) }}
+        <ol class="timeline" aria-label="操作履歴">
+          {{- range .Extra.Entries }}
+            <li class="timeline-item">
+              <span class="timeline-dot" aria-hidden="true"></span>
+              <div>
+                <div class="timeline-msg">{{ .action_ja }}<span class="timeline-when" style="margin-left: var(--space-2);"><time datetime="{{ .occurred_at }}">{{ .occurred_at }}</time></span></div>
+              </div>
+            </li>
+          {{- end }}
+        </ol>
+      {{- else }}
+        {{ template "partials/empty_state" (dict "title" "履歴がありません" "body" "ファイルのアップロードや削除を行うと、ここに記録されます。") }}
+      {{- end }}
+    </main>
+  </div>
+</div>
+{{- end -}}

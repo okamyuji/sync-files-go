@@ -140,29 +140,26 @@ func emitUploadError(w http.ResponseWriter, d *Deps, ctx context.Context, err er
 }
 
 // executeUpload 実書き込み + メタデータ確定の流れ。
+//
+// 設計書 04-sync-semantics.md §6.1 と FK 制約 (file_versions → files) を満たすため、
+// 段階的にコネクションを使う：
+//
+//  1. OCC 事前チェック（Reader 経由、UNIQUE 制約が CR-2 を守る）
+//  2. tmp に encrypt → versions/{file_id}/{version_id} に rename (immutable)
+//  3. 新規時: files INSERT を単独コネクションで先に実施（FK 親作成）
+//  4. トランザクション開始: 上書き時は SELECT FOR UPDATE で OCC を再確認
+//     → file_versions INSERT → files UPDATE current_version_id → audit → COMMIT
+//
+// 大容量アップロード中はトランザクションを開かないので、ロック待ちタイムアウトが起きない。
 func executeUpload(ctx context.Context, d *Deps, sess middleware.UserSession, path string, pre domain.Precondition, body io.Reader, r *http.Request) (*uploadResult, error) {
-	tx, err := d.Router.Writer(ctx).BeginTx(ctx, nil)
+	curBefore, err := preflightOCC(ctx, d, sess.UserID, path, pre)
 	if err != nil {
 		return nil, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	cur, err := d.Files.FindActiveByOwnerPath(ctx, tx, sess.UserID, path)
-	if err != nil && !errors.Is(err, mysql.ErrNotFound) {
-		return nil, err
-	}
-	if e := evaluateOCC(cur, pre); e != nil {
-		return nil, e
-	}
 
 	fileID := uuid.New()
-	if cur != nil {
-		fileID = cur.ID
+	if curBefore != nil {
+		fileID = curBefore.ID
 	}
 	versionID := uuid.New()
 
@@ -175,15 +172,62 @@ func executeUpload(ctx context.Context, d *Deps, sess middleware.UserSession, pa
 		return nil, err
 	}
 
-	if err := persistVersion(ctx, d, tx, sess, cur, fileID, versionID, dek, header, sha, sizeBytes, path, r.Header.Get("Content-Type")); err != nil {
-		return nil, err
+	if curBefore == nil {
+		if err := ensureFileRow(ctx, d, sess.UserID, fileID, path, r.Header.Get("Content-Type"), sha, sizeBytes); err != nil {
+			return nil, err
+		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitVersion(ctx, d, sess, curBefore, fileID, versionID, dek, header, sha, sizeBytes, path, pre); err != nil {
 		return nil, err
 	}
+	return &uploadResult{fileID: fileID, versionID: versionID, created: curBefore == nil}, nil
+}
+
+// preflightOCC OCC 事前チェック。FOR UPDATE 無しで Primary を読む。
+func preflightOCC(ctx context.Context, d *Deps, ownerID uuid.UUID, path string, pre domain.Precondition) (*domain.File, error) {
+	curBefore, err := d.Files.GetByOwnerPathActive(ctx, ownerID, path)
+	if err != nil && !errors.Is(err, mysql.ErrNotFound) {
+		return nil, err
+	}
+	if e := evaluateOCC(curBefore, pre); e != nil {
+		return nil, e
+	}
+	return curBefore, nil
+}
+
+// commitVersion トランザクションを開いて file_versions + files UPDATE + audit を確定する。
+// 上書き時は SELECT FOR UPDATE で OCC を再確認する（二重 OCC、設計書 04 §6.1）。
+func commitVersion(ctx context.Context, d *Deps, sess middleware.UserSession, curBefore *domain.File, fileID, versionID uuid.UUID, dek, header, sha []byte, sizeBytes int64, path string, pre domain.Precondition) error {
+	tx, err := d.Router.Writer(ctx).BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if curBefore != nil {
+		curNow, err := d.Files.FindActiveByOwnerPath(ctx, tx, sess.UserID, path)
+		if err != nil {
+			return err
+		}
+		if e := evaluateOCC(curNow, pre); e != nil {
+			return e
+		}
+	}
+
+	if err := persistVersion(ctx, d, tx, sess, curBefore, fileID, versionID, dek, header, sha, sizeBytes); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	committed = true
-	return &uploadResult{fileID: fileID, versionID: versionID, created: cur == nil}, nil
+	return nil
 }
 
 // evaluateOCC ResolveOCC のルールを HTTP ステータスへ写像。nil なら続行可。
@@ -249,18 +293,44 @@ func writeEncryptedVersion(ctx context.Context, d *Deps, ownerID, fileID, versio
 	return header, hasher.Sum(nil), counter.n, nil
 }
 
-// persistVersion file_versions / files / audit_logs を 1 トランザクションで確定。
-func persistVersion(ctx context.Context, d *Deps, tx *sql.Tx, sess middleware.UserSession, cur *domain.File, fileID, versionID uuid.UUID, dek, header, sha []byte, sizeBytes int64, path, contentType string) error {
+// ensureFileRow 新規アップロード時に親 files 行を先に作る（FK 制約のため）。
+//
+// `current_version_id_bin` は NULL で INSERT し、その後 file_versions Insert + UPDATE で確定する。
+// 失敗で残った CurrentVersionID=NULL の files 孤児は補正ジョブが掃除する。
+func ensureFileRow(ctx context.Context, d *Deps, ownerID, fileID uuid.UUID, path, contentType string, sha []byte, sizeBytes int64) error {
 	now := time.Now().UTC()
-	nextVer, err := d.FileVersions.NextVersionNumber(ctx, tx, fileID)
-	if err != nil {
-		return err
+	f := &domain.File{
+		ID:               fileID,
+		OwnerID:          ownerID,
+		Name:             pathBaseName(path),
+		Path:             path,
+		CurrentVersionID: nil, // file_versions Insert 後に UPDATE で埋める
+		SizeBytes:        sizeBytes,
+		ContentType:      contentType,
+		SHA256:           sha,
+		State:            domain.FileStateActive, // active_marker UNIQUE が CR-2 を守る
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
+	return d.Files.Insert(ctx, f)
+}
+
+// persistVersion file_versions / files / audit_logs を 1 トランザクションで確定する。
+//
+// 呼び出し前に親 files 行が存在することを前提とする（新規時は ensureFileRow で作成済み、
+// 上書き時は OCC で SELECT FOR UPDATE 済み）。
+func persistVersion(ctx context.Context, d *Deps, tx *sql.Tx, sess middleware.UserSession, cur *domain.File, fileID, versionID uuid.UUID, dek, header, sha []byte, sizeBytes int64) error {
+	now := time.Now().UTC()
 	u, err := d.Users.FindByID(ctx, sess.UserID)
 	if err != nil {
 		return err
 	}
 	dekEnc := wrapKeyDev(dek, u.KEKEnc)
+
+	nextVer, err := d.FileVersions.NextVersionNumber(ctx, tx, fileID)
+	if err != nil {
+		return err
+	}
 
 	v := &domain.FileVersion{
 		ID:                 versionID,
@@ -280,27 +350,9 @@ func persistVersion(ctx context.Context, d *Deps, tx *sql.Tx, sess middleware.Us
 		return err
 	}
 
-	if cur == nil {
-		f := &domain.File{
-			ID:               fileID,
-			OwnerID:          sess.UserID,
-			Name:             pathBaseName(path),
-			Path:             path,
-			CurrentVersionID: &versionID,
-			SizeBytes:        sizeBytes,
-			ContentType:      contentType,
-			SHA256:           sha,
-			State:            domain.FileStateActive,
-			CreatedAt:        now,
-			UpdatedAt:        now,
-		}
-		if err := d.Files.Insert(ctx, f); err != nil {
-			return err
-		}
-	} else {
-		if err := d.Files.UpdateCurrentVersion(ctx, tx, fileID, versionID, sha, sizeBytes, now); err != nil {
-			return err
-		}
+	// 新規・上書きどちらも UPDATE で current_version_id を確定
+	if err := d.Files.UpdateCurrentVersion(ctx, tx, fileID, versionID, sha, sizeBytes, now); err != nil {
+		return err
 	}
 
 	return d.Audit.Insert(ctx, tx, &mysql.AuditEntry{

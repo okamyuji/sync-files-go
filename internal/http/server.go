@@ -77,6 +77,7 @@ func NewServer(d *Deps) http.Handler {
 	mux.Handle("GET /api/files/{id}", authMW(downloadFileHandler(d)))
 	mux.Handle("DELETE /api/files/{id}", authMW(deleteFileHandler(d)))
 	mux.Handle("POST /api/files/{id}/restore", authMW(restoreFileHandler(d)))
+	mux.Handle("POST /api/files/{id}/save-as-copy", authMW(saveAsCopyHandler(d)))
 
 	// 公開リンク（認証必須側）
 	mux.Handle("POST /api/files/{id}/share-links", authMW(createShareLinkHandler(d)))

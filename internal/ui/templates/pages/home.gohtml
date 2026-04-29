@@ -1,19 +1,32 @@
-{{- /* home  プレースホルダ（ステージ B で本実装に置き換え）。 */ -}}
+{{- /* home  ホーム画面：ファイル一覧 + 常設アップロードゾーン + 競合モーダル。 */ -}}
 {{- define "content" -}}
 <div class="app">
   {{ template "partials/header" . }}
   <div class="app-shell">
     {{ template "partials/sidebar" . }}
     <main class="app-main" id="main">
-      <header class="section-head">
-        <h1 class="section-title">ホーム</h1>
-        <p class="section-sub">アップロード済みのファイルが表示されます。</p>
+
+      <header class="file-toolbar">
+        <div>
+          <h1 class="file-toolbar-title">ホーム</h1>
+          <p class="file-toolbar-meta">
+            {{- with .Extra.Files -}}
+              {{ len . }} 件
+            {{- else -}}
+              ファイルがありません
+            {{- end -}}
+          </p>
+        </div>
+        <div class="file-toolbar-actions">
+          <a class="btn btn-ghost btn-sm" href="/share-links">共有リンク</a>
+          <a class="btn btn-ghost btn-sm" href="/trash">ゴミ箱</a>
+        </div>
       </header>
 
-      {{- if and .Extra .Extra.Files }}
+      {{- if and .Extra .Extra.Files (gt (len .Extra.Files) 0) }}
         <table class="file-table" aria-label="ファイル一覧">
           <thead>
-            <tr><th>名前</th><th>サイズ</th><th>更新日時</th><th class="file-actions">操作</th></tr>
+            <tr><th scope="col">名前</th><th scope="col">サイズ</th><th scope="col">更新日時</th><th scope="col" class="file-actions">操作</th></tr>
           </thead>
           <tbody>
             {{- range .Extra.Files }}
@@ -22,19 +35,18 @@
           </tbody>
         </table>
       {{- else }}
-        {{ template "partials/empty_state" (dict "title" "まだファイルがありません" "body" "右下のアップロードゾーンにファイルをドラッグ&ドロップするか、ボタンから選択してください。") }}
+        {{ template "partials/empty_state" (dict "title" "まだファイルがありません" "body" "下のドロップゾーンにファイルをドラッグ&ドロップするか、ボタンから選択してください。") }}
       {{- end }}
 
       <section class="upload-zone" data-upload-zone aria-label="ファイルアップロード">
         <p class="upload-zone-title">ファイルをドラッグ&ドロップ</p>
-        <p class="upload-zone-hint">または下のボタンから選択</p>
-        <form method="post" enctype="multipart/form-data" action="/api/files"
-              data-progress="upload-progress" style="margin-top: var(--space-4)">
-          <input type="hidden" name="_csrf" value="{{ .CSRFToken }}" />
+        <p class="upload-zone-hint">または下のフォームから選択（最大 {{ if and .Extra .Extra.MaxUploadMiB }}{{ .Extra.MaxUploadMiB }} MiB{{ else }}2 GiB{{ end }}）</p>
+        <form data-upload-form method="post" enctype="multipart/form-data" action="/api/files"
+              style="margin-top: var(--space-4); display: flex; gap: var(--space-3); align-items: center; justify-content: center; flex-wrap: wrap;">
           <input type="file" name="file" required aria-label="アップロードするファイル" />
-          <button class="btn btn-primary" type="submit" style="margin-left: var(--space-3)">アップロード</button>
-          <progress class="upload-progress" id="upload-progress" max="100" value="0" aria-label="アップロード進捗"></progress>
+          <button class="btn btn-primary" type="submit">アップロード</button>
         </form>
+        <progress class="upload-progress" max="100" value="0" aria-label="アップロード進捗"></progress>
       </section>
 
       {{ template "partials/conflict_modal" . }}

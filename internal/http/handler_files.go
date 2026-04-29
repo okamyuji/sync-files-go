@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -491,6 +492,99 @@ func deleteFileHandler(d *Deps) http.HandlerFunc {
 	}
 }
 
+// saveAsCopyHandler POST /api/files/{id}/save-as-copy 設計書 04 §4.3。
+//
+// OCC 競合時に「別名で保存」を選んだクライアント用。サーバ側で
+// ConflictCopyName 規則に従い新しいパスを決め、新規ファイルとしてアップロードする。
+//
+// 入力: body は単純なファイルバイト列（POST /api/files と同じ）。
+// X-File-Path ヘッダは無視する（パスはサーバが決定）。
+// X-Device-Label ヘッダがあればコピー名のデバイス部に使う（任意）。
+func saveAsCopyHandler(d *Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess, ok := middleware.SessionFrom(r.Context())
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		fileID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, "bad id", http.StatusBadRequest)
+			return
+		}
+		ctx := r.Context()
+		orig, err := d.Files.FindByID(ctx, fileID)
+		if err != nil {
+			if errors.Is(err, mysql.ErrNotFound) {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			internalError(w, d, ctx, "find file", err)
+			return
+		}
+		if orig.OwnerID != sess.UserID {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		device := strings.TrimSpace(r.Header.Get("X-Device-Label"))
+		if device == "" {
+			device = deviceLabelFromUA(r.UserAgent())
+		}
+		newName := domain.ConflictCopyName(orig.Name, device, time.Now().UTC())
+		newPath := pathReplaceBaseName(orig.Path, newName)
+
+		body := http.MaxBytesReader(w, r.Body, d.Cfg.MaxUploadBytes)
+		defer func() { _ = body.Close() }()
+
+		// 新規アップロードなので If-None-Match: * を使う。コンフリクトコピー先に既存があれば 412 になる。
+		pre := domain.Precondition{IfNoneMatch: "*"}
+		res, err := executeUpload(ctx, d, sess, newPath, pre, body, r)
+		if err != nil {
+			emitUploadError(w, d, ctx, err)
+			return
+		}
+
+		middleware.SetRAWCookie(w, sess.SessionID, time.Now().Add(d.Cfg.RAWWindow), d.Cfg.SessionKey)
+		w.Header().Set("ETag", res.versionID.String())
+		w.Header().Set("X-File-Id", res.fileID.String())
+		w.Header().Set("X-File-Path", newPath)
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"id":   res.fileID.String(),
+			"path": newPath,
+		})
+	}
+}
+
+// pathReplaceBaseName 「/foo/bar.txt」のベース名だけを差し替える。設計書 04 §4.4。
+func pathReplaceBaseName(p, newBase string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[:i+1] + newBase
+		}
+	}
+	return newBase
+}
+
+// deviceLabelFromUA 雑な User-Agent → デバイスラベル。詳細推定は将来。
+func deviceLabelFromUA(ua string) string {
+	switch {
+	case strings.Contains(ua, "iPhone"):
+		return "iPhone"
+	case strings.Contains(ua, "iPad"):
+		return "iPad"
+	case strings.Contains(ua, "Android"):
+		return "Android"
+	case strings.Contains(ua, "Macintosh"):
+		return "Mac"
+	case strings.Contains(ua, "Windows"):
+		return "Windows"
+	case strings.Contains(ua, "Linux"):
+		return "Linux"
+	}
+	return "browser"
+}
+
 // restoreFileHandler ゴミ箱からの復元。
 func restoreFileHandler(d *Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -523,16 +617,35 @@ func restoreFileHandler(d *Deps) http.HandlerFunc {
 }
 
 // writeConflictResponse 設計書 04 §4.3 の OCC 衝突 JSON を返す。
+//
+// HX-Trigger: openConflictModal を出すと、フロント側 (app.js) が <dialog> を開く。
+// JSON は HX-Trigger ヘッダ経由ではなく **本文** として送り、UI は AfterOnLoad で本文を読む。
 func writeConflictResponse(w http.ResponseWriter, cur *domain.File) {
 	w.Header().Set("HX-Trigger", "openConflictModal")
-	body := map[string]any{
-		"kind":                "version_mismatch",
-		"current_version_id":  "",
-		"current_modified_at": cur.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		"current_modified_by": "another-session",
-	}
+
+	curVersion := ""
 	if cur.CurrentVersionID != nil {
-		body["current_version_id"] = cur.CurrentVersionID.String()
+		curVersion = cur.CurrentVersionID.String()
+	}
+	fileID := cur.ID.String()
+	body := map[string]any{
+		"kind": "version_mismatch",
+		"file": map[string]any{
+			"id":                  fileID,
+			"path":                cur.Path,
+			"name":                cur.Name,
+			"current_version_id":  curVersion,
+			"current_modified_at": cur.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			"size_bytes":          cur.SizeBytes,
+		},
+		// options は表示用（実 URL は UI 側で組み立ててもよい）。
+		// /api/files プレフィックスで統一。
+		"options": []map[string]any{
+			{"id": "save_as_copy", "label": "別名で保存（推奨）", "method": "POST", "url": "/api/files/" + fileID + "/save-as-copy"},
+			{"id": "force_overwrite", "label": "上書き（旧版は90日復元可）", "method": "POST", "url": "/api/files", "headers": map[string]any{"If-Match": "*", "X-File-Path": cur.Path}, "warn": true},
+			{"id": "view_server", "label": "サーバ版を確認", "method": "GET", "url": "/api/files/" + fileID},
+			{"id": "cancel", "label": "キャンセル"},
+		},
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusConflict)

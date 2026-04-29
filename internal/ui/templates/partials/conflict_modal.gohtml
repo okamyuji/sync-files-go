@@ -1,16 +1,20 @@
-{{- /* conflict_modal  OCC 競合時に app.js が中身を埋める。
-        各ページ（home / pages/files など）から呼び出して body 末尾近くに置く。 */ -}}
+{{- /* conflict_modal  OCC 409 で表示する 3 択モーダル（設計書 04 §4.3）。
+        app.js が `openConflictModal` イベントで本文を埋め、3 つのアクションボタンを
+        現在ホールドしている FormData / file 入力で起動する。
+        ボタンの実 URL や method は data-* 属性で持たせ、JS で組み立てる。 */ -}}
 {{- define "partials/conflict_modal" -}}
 <dialog id="conflict-modal" aria-labelledby="conflict-modal-title">
   <div class="dialog-head" id="conflict-modal-title">バージョンの競合</div>
   <div class="dialog-body" data-conflict-body>
-    <p>サーバ側のバージョンが先に進んでいます。</p>
+    <p>サーバ側のバージョンが先に進んでいます。どうしますか？</p>
   </div>
-  <div class="dialog-foot">
-    <form method="dialog">
-      <button class="btn btn-ghost" type="submit">閉じる</button>
+  <div class="dialog-foot" style="flex-wrap: wrap; justify-content: stretch; gap: var(--space-2);">
+    <form method="dialog" style="margin-right: auto;">
+      <button class="btn btn-ghost" type="submit" data-conflict-action="cancel">キャンセル</button>
     </form>
-    <button class="btn btn-primary" type="button" data-action="reload">最新を読み込む</button>
+    <button class="btn btn-secondary" type="button" data-conflict-action="view_server">サーバ版を確認</button>
+    <button class="btn btn-danger" type="button" data-conflict-action="force_overwrite">上書き</button>
+    <button class="btn btn-primary" type="button" data-conflict-action="save_as_copy">別名で保存（推奨）</button>
   </div>
 </dialog>
 {{- end -}}

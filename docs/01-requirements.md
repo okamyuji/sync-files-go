@@ -159,7 +159,7 @@
 | F-5.1 | 各ファイルに対し過去版を最新から最大 100 版まで UI に表示 | 100 版を超える分は古いものから自動削除（v1） |
 | F-5.2 | 任意の旧版を「復元（巻き戻し）」できる | 旧版の中身を新版として再書き込みする方式（旧版は残る） |
 | F-5.3 | 旧版を個別に削除できる（ユーザ明示操作） | これも監査ログに記録 |
-| F-5.4 | **v1 のバージョン保持期間: 90 日（CR-5 修正）** | S3 ライフサイクル `noncurrent_version_expiration` で 90 日後に完全消去。これと「ユーザ個別削除」を整合させる |
+| F-5.4 | **v1 のバージョン保持期間: 90 日** | アプリ層の日次バッチ `prune-old-versions` で `file_versions.created_at < NOW() - INTERVAL 90 DAY` かつ非 current のものを削除（`05-file-operations-logic-tree.md` §7.2）。**S3 lifecycle の `noncurrent_version_expiration` には依存しない**（immutable key 設計のため機能しない） |
 | F-5.5 | バージョン保持の延長は v2 候補 | v2 でユーザ設定として「90 日」「1 年」「無期限」を選べるようにする |
 
 ### F-6. 競合解決（OCC）

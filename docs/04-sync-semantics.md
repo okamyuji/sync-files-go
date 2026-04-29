@@ -64,7 +64,7 @@ func handleUpload(ctx, w, r) {
     cur, _ := tx.QueryRow(ctx,
         `SELECT id, current_version_id, state
            FROM files
-          WHERE owner_id = $1 AND path = $2 AND state = 'active'
+          WHERE owner_id = ? AND path = ? AND state = 'active'
           FOR UPDATE`,
         sess.UserID, path,
     )

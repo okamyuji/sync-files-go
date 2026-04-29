@@ -150,10 +150,9 @@ func TestUploadDelete_RoundTrip(t *testing.T) {
     app.ServeHTTP(w, withSession(t, req, "user-1"))
     require.Equal(t, 201, w.Code)
     fileID := w.Header().Get("X-File-Id")
-    versionID := w.Header().Get("ETag")
+    versionID := w.Header().Get("ETag")  // = version_uuid
 
-    // ファイルが S3 Files (ローカル FS) にあるか
-    versionID := w.Header().Get("ETag")  // version_uuid
+    // ファイルが S3 Files (ローカル FS) 上の immutable key にあるか
     contents := readFromStorage(t, fs, "owner-user-1/versions/"+fileID+"/"+versionID)
     require.Equal(t, "hello world", decryptForTest(t, contents))
 
@@ -166,7 +165,7 @@ func TestUploadDelete_RoundTrip(t *testing.T) {
 
     // メタデータでは trashed
     var state string
-    db.QueryRow("SELECT state FROM files WHERE id=$1", fileID).Scan(&state)
+    db.QueryRow("SELECT state FROM files WHERE id=?", fileID).Scan(&state)
     require.Equal(t, "trashed", state)
 
     // S3 Files 上のバージョンは無傷 (INV-1)

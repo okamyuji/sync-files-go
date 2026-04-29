@@ -7,6 +7,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"errors"
+	"html/template"
 	"net/http"
 	"strings"
 	"time"
@@ -64,7 +65,11 @@ func totpSetupPageHandler(d *Deps) http.HandlerFunc {
 			internalError(w, d, r.Context(), "totp qr", err)
 			return
 		}
-		dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
+		// html/template は data: URL を `#ZgotmplZ` にサニタイズしてしまうため、
+		// サーバが構築した安全な URL であることを template.URL で明示する。
+		// 中身は qrcode.Encode が生成した PNG (バイナリ) を base64 した固定 prefix 付き文字列で、
+		// ユーザ入力は混入しないため XSS にならない。
+		dataURL := template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png)) // #nosec G203 -- server-built data URL, no user input
 
 		_ = d.UI.Render(w, r, http.StatusOK, "settings_totp", &ui.PageData{
 			Title:       "2 段階認証",

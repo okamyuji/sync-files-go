@@ -1,0 +1,66 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.history/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+/dist/
+/build/
+vendor/
+coverage.txt
+coverage.html
+go.work
+go.work.sum
+
+# Environment / secrets (絶対にコミットしない)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+**/credentials.json
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Docker
+*.tar
+
+# 一時ファイル
+tmp/
+temp/
+.cache/
+
+# ローカルテスト用 S3 / DB データ
+.local-data/

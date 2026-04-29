@@ -153,7 +153,8 @@ func TestUploadDelete_RoundTrip(t *testing.T) {
     versionID := w.Header().Get("ETag")
 
     // ファイルが S3 Files (ローカル FS) にあるか
-    contents := readFromStorage(t, fs, "owner-user-1/current/"+fileID)
+    versionID := w.Header().Get("ETag")  // version_uuid
+    contents := readFromStorage(t, fs, "owner-user-1/versions/"+fileID+"/"+versionID)
     require.Equal(t, "hello world", decryptForTest(t, contents))
 
     // ソフト削除
@@ -168,8 +169,8 @@ func TestUploadDelete_RoundTrip(t *testing.T) {
     db.QueryRow("SELECT state FROM files WHERE id=$1", fileID).Scan(&state)
     require.Equal(t, "trashed", state)
 
-    // S3 Files 上のファイルは無傷 (INV-1)
-    require.True(t, fileExistsInStorage(t, fs, "owner-user-1/current/"+fileID))
+    // S3 Files 上のバージョンは無傷 (INV-1)
+    require.True(t, fileExistsInStorage(t, fs, "owner-user-1/versions/"+fileID+"/"+versionID))
 }
 ```
 

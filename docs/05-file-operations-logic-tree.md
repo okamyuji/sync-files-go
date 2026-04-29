@@ -133,7 +133,7 @@ SELECT files WHERE id = $1 AND owner_id = $2 AND state = 'active'
 ### 2.1 公開リンク経由のダウンロード
 
 ```
-[GET /share/{id}]   (未認証、id は ShareLink.id)
+[GET /share/{token}]   (未認証、token は base64url 32 bytes ランダム、サーバ側で SHA-256(token) を share_links.token_hash と照合)
    │
    ▼
 [レート制限: IP 単位 30 req/min]
@@ -143,7 +143,7 @@ SELECT * FROM share_links WHERE id = $1
    ├── なし                          → 404
    ├── revoked_at IS NOT NULL        → 410 Gone
    ├── expires_at < now()            → 410 Gone (UI に「期限切れ」)
-   ├── password_hash IS NOT NULL かつ未認証 → /share/{id}/password ページへ 302
+   ├── password_hash IS NOT NULL かつ未認証 → /share/{token}/password ページへ 302
    └── アクセス可 →
          │
          ▼
@@ -283,13 +283,15 @@ SELECT files FOR UPDATE WHERE id = $1
    INSERT audit_logs (action='file.purge', irreversible=true)
 ```
 
-## 7. 物理削除（バッチ）
+## 7. 物理削除（バッチ）と旧版 prune
+
+### 7.1 ゴミ箱の物理削除（30 日経過）
 
 ```
 [ECS Scheduled Task: every day 03:00 JST]
    │
    ▼
-SELECT id, owner_id, storage_key
+SELECT id_bin AS file_id_bin, owner_id_bin
   FROM files
  WHERE state = 'trashed'
    AND deleted_at < NOW() - INTERVAL 30 DAY
@@ -308,7 +310,56 @@ for each row:
      continue   -- 1 件の失敗で全体を止めない
 ```
 
-`v2`：S3 ライフサイクルが purged 状態のオブジェクトを 90 日後に完全消去 → `state='gone'` に更新するバッチも実装。
+### 7.2 旧版 prune（90 日経過、CR-5 新規対応）
+
+immutable key 設計では S3 の `noncurrent_version_expiration` が機能しないため、アプリ層で明示的に古いバージョンを削除する：
+
+```
+[ECS Scheduled Task: every day 04:00 JST]
+   │
+   ▼
+SELECT fv.id_bin AS version_id_bin, fv.file_id_bin, f.owner_id_bin
+  FROM file_versions fv
+  JOIN files f ON f.id_bin = fv.file_id_bin
+ WHERE fv.created_at < NOW() - INTERVAL 90 DAY
+   AND fv.id_bin <> COALESCE(f.current_version_id_bin, X'00000000000000000000000000000000')
+   AND fv.deleted_by_user = 0
+ ORDER BY fv.created_at ASC
+ LIMIT 1000;
+   │
+   ▼
+for each fv:
+   try:
+     os.Remove(/var/data/owner-X/versions/{fv.file_id_bin}/{fv.id_bin})
+     DELETE FROM file_versions WHERE id_bin = fv.id_bin
+     INSERT audit_logs (action='file_version.prune_by_age', irreversible=true,
+                         details_json={ file_id, version_id, age_days })
+   except err:
+     log.error
+     continue
+```
+
+設計ポイント：
+- `current_version_id_bin` のものは絶対に消さない（最新版は age に関係なく残す）
+- `deleted_by_user = 0` のものだけ自動 prune（ユーザが「この版だけ残す」と明示した版は対象外。F-5.3）
+- このバッチが落ちると旧版が無限に蓄積する → CloudWatch アラートで「直近 24h で prune 実行 0」を検知
+
+### 7.3 「最大 100 版」上限の維持
+
+書き込み時、新版 INSERT 後に「自分のファイルの version_number 最古から 100 版を超える分」を即時 prune：
+
+```
+DELETE fv FROM file_versions fv
+ WHERE fv.file_id_bin = ?
+   AND fv.id_bin <> ?  -- 新しく作った current
+   AND fv.deleted_by_user = 0
+   AND fv.version_number <= (
+      SELECT MAX(version_number) - 100 FROM file_versions WHERE file_id_bin = ?
+   );
+-- 対応する S3 オブジェクトもアプリで os.Remove
+```
+
+`v2`：物理削除済みファイル全体を `state='gone'` に更新するバッチも実装（90 日後の完全消去確認）。
 
 ## 8. 共有リンク作成
 
@@ -336,7 +387,7 @@ INSERT INTO share_links (id_bin=UUID_TO_BIN(UUID()), file_id_bin, token_hash, ex
 INSERT audit_logs (action='share.create', target_id=share_link.id)
    │
    ▼
-return JSON: { "url": "https://example.com/share/{id}", ... }
+return JSON: { "url": "https://example.com/share/{token}", ... }
 ```
 
 ### 8.1 共有リンクの取り消し

@@ -292,7 +292,7 @@ func RAWMiddleware(signKey []byte) func(http.Handler) http.Handler {
                                                                                               │
                                                               tmp 書き込み, encrypt, fsync ──> [S3 Files]
                                                                                               │
-                                                              os.Rename → current ─────────> [S3 Files]
+                                                              os.Rename → versions/{file_uuid}/{version_uuid} ─> [S3 Files]
                                                                                               │
                                                               INSERT file_versions, audit ──> [MySQL Primary]
                                                                                               │
@@ -414,7 +414,7 @@ S3 Files 上のファイルには手をつけない（INV-1）。
 
 | SG | Inbound | Outbound |
 |---|---|---|
-| `ecs` | **すべて拒否**（Cloudflare Tunnel は outbound のみ） | 5432→`rds`、443→VPCエンドポイント、443→Cloudflare（IGW 経由） |
+| `ecs` | **すべて拒否**（Cloudflare Tunnel は outbound のみ） | 3306→`rds`、2049→S3 Files VPCE、443→VPCエンドポイント、443→Cloudflare（IGW 経由） |
 | `rds` | 3306 from `ecs` | none |
 | `vpce-*` | 443 from `ecs` | none |
 
@@ -425,7 +425,7 @@ S3 Files 上のファイルには手をつけない（INV-1）。
 | コンポーネント | 多重化 | 理由 |
 |---|---|---|
 | Cloudflare Edge | Cloudflare Anycast | 通常運用で意識不要。障害時は ALB 一時起動の Runbook あり |
-| ECS Fargate | desiredCount = 1〜3 / Multi-AZ | 個人専用なので 1 が常態。AutoScaling は急増対応 |
+| ECS Fargate | **v1: desiredCount = 1 / max_capacity = 1**（NFS open-while-delete 等の実機検証完了まで AutoScaling は無効） | 個人専用 + 安全寄せ。検証完了後 v2 で 1〜3 |
 | RDS Primary | Multi-AZ standby | 自動フェイルオーバ |
 | RDS Read Replica | 1 個（v1） | Replica 不調時は縮退運転で Primary 一本化 |
 | S3 Files | AWS が冗長化 | 同一リージョン内で多重化 |

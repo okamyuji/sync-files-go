@@ -416,15 +416,22 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
     status = "Enabled"
     abort_incomplete_multipart_upload { days_after_initiation = 7 }
   }
+
+  # CR-5 新規対応: immutable key 設計により S3 の noncurrent_version_expiration は使えない。
+  # 旧版の 90 日 prune はアプリ層の ECS Scheduled Task で実行 (05-file-operations-logic-tree.md §7.2)。
+  # ただし「物理削除によって付与された DeleteMarker 配下の noncurrent」だけは S3 で 90 日後に完全消去。
   rule {
-    id     = "expire-old-versions"
+    id     = "expire-deleted-objects-noncurrent"
     status = "Enabled"
     noncurrent_version_expiration { noncurrent_days = 90 }
+    # versions/* に付与された DeleteMarker の旧版を 90 日で完全消去
+    filter { prefix = "owner-" }  # "owner-*/versions/" を含む
   }
+
   rule {
     id     = "expire-tmp"
     status = "Enabled"
-    filter { prefix = "owner-*/tmp/" }
+    filter { prefix = "owner-" }  # "owner-*/tmp/" を含む全 owner
     expiration { days = 7 }
   }
 }

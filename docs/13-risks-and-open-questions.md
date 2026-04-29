@@ -76,11 +76,13 @@
 - 通常時の `Seconds_Behind_Source` をベースラインとして取得
 - read-after-write window の最適値（3 秒？ 5 秒？）を実測で決定
 
-### 3.6 アプリ層 AES-GCM のチャンク化方式
+### 3.6 アプリ層 Streaming AEAD ライブラリの最終選定
 
-- 1 MiB チャンク + 連番 nonce 方式が標準的か、より良い方式があるか調査
-- 候補：[chunked-AEAD-deterministic](https://github.com/google/tink) / NaCl SecretStream
-- 標準ライブラリのみで実装する制約と整合するか
+- ADR-005 にて自前 nonce 戦略は **不採用** と決定済み。第一候補は Tink Streaming AEAD (AES-256-GCM-HKDF-1MB)
+- 実装着手前に次を確認：
+  - tink-go v2 の Streaming AEAD が arm64 + Distroless で問題なく動作するか
+  - age, libsodium SecretStream をどの順で代替候補に並べるか
+  - 暗号化スキーム名 `encryption_scheme` の値の正準化（例: `tink-streaming-aead-aes256-gcm-hkdf-1mb-v1`）
 
 ### 3.7 SSE の負荷
 

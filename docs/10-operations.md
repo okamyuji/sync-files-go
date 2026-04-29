@@ -213,14 +213,16 @@ mysql -h <new-endpoint> -u rdsadmin -p sync -e "SELECT count(*) FROM files;"
 # S3 上で「以前のバージョン」を確認
 aws s3api list-object-versions \
   --bucket sync-files-go-prod-data-XXXXX \
-  --prefix "owner-<user-uuid>/current/" \
+  --prefix "owner-<user-uuid>/versions/" \
   --max-items 50
 
-# 旧版を復元
+# 旧版を「新しいファイルバージョンとして」復元
+# （immutable key 設計のため、対象 file_uuid に対し新しい version_uuid を生成）
+NEW_VERSION_UUID=$(uuidgen)
 aws s3 cp \
-  s3://sync-files-go-prod-data-XXXXX/owner-../current/<file-uuid> \
-  s3://sync-files-go-prod-data-XXXXX/owner-../current/<file-uuid> \
-  --version-id <past-version-id>
+  s3://sync-files-go-prod-data-XXXXX/owner-X/versions/<file-uuid>/<past-version-uuid> \
+  s3://sync-files-go-prod-data-XXXXX/owner-X/versions/<file-uuid>/${NEW_VERSION_UUID}
+# その後 sync-files-admin restore-file CLI でメタデータも整合させる
 ```
 
 ただしアプリ側のメタデータ整合性も必要なので、運用 CLI コマンドを用意（次節）。
@@ -230,11 +232,13 @@ aws s3 cp \
 `bin/sync-files-admin` という CLI を提供：
 
 ```
-sync-files-admin restore-file --user <id> --file <id> --to-version <s3-version-id>
+sync-files-admin restore-file --user <id> --file <id> --to-version <past-version-uuid>
 sync-files-admin restore-purged --user <id> --file <id> --before <ts>
 sync-files-admin reconcile-orphans --dry-run
 sync-files-admin export-user-data --user <id> --out <dir>
 sync-files-admin rotate-aes-key --new-master-key <base64>
+sync-files-admin force-purge --user <id> --file <id>           # ADR-009: INV-1 の例外、UI からは到達不能
+sync-files-admin prune-old-versions --dry-run                   # 90 日経過した非 current 版を一覧/削除 (CR-5)
 ```
 
 CLI は ECS Exec から実行し、操作はすべて `audit_logs` に `actor_kind='system'` で記録。
@@ -308,7 +312,7 @@ CLI は ECS Exec から実行し、操作はすべて `audit_logs` に `actor_ki
 ```
 1. Cost Explorer で内訳確認
 2. 上昇要因: データ転送 / S3 Files 同期リクエスト / Fargate オートスケール
-3. 短期: AutoScaling 上限を一時的に下げる
+3. 短期: v1 は desiredCount=1 固定なのでスケールアウト要因は除外。Fargate のタスクサイズ（vCPU / memory）を上げる方向で対応
 4. 長期: コスト最適化（後述 §8）
 ```
 
@@ -384,7 +388,7 @@ ALB を緊急起動して Cloudflare をバイパス：
 ### 7.2 容量逼迫時の対応
 
 ```
-[ECS]   → desiredCount 増 (AutoScaling 上限見直し)
+[ECS]   → v1 はスケールアウト不可。タスクサイズを CPU/Memory で上げる。S3 Files の複数同時マウント検証完了後に v2 でスケールアウト解禁
 [RDS]   → instance class アップ (db.t4g.micro → small)
         → ストレージ自動拡張は 100GB 上限で済むかチェック
 [S3]    → 古いバージョンの保持期間短縮

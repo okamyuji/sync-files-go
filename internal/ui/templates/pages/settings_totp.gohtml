@@ -1,0 +1,81 @@
+{{- /* settings_totp  TOTP 設定 / 解除画面（Google Authenticator 等）。 */ -}}
+{{- define "content" -}}
+<div class="app">
+  {{ template "partials/header" . }}
+  <div class="app-shell">
+    {{ template "partials/sidebar" . }}
+    <main class="app-main" id="main">
+      <header class="section-head">
+        <h1 class="section-title">2 段階認証</h1>
+        <p class="section-sub">
+          {{- if .Extra.Enabled -}}
+            現在: <span class="badge badge-success">有効</span> — 解除には現行コードとパスワードが必要です
+          {{- else -}}
+            有効化すると、ログイン時にパスワードに加えて Authenticator アプリのコードが必須になります
+          {{- end -}}
+        </p>
+      </header>
+
+      {{- if .Extra.Error }}
+        <div class="notif" data-kind="warn" role="alert" style="margin-bottom: var(--space-4)">
+          {{ .Extra.Error }}
+        </div>
+      {{- end }}
+
+      {{- if .Extra.Enabled }}
+        <section class="auth-card" style="max-width: 520px; margin: 0;">
+          <h2 class="auth-title" style="font-size: var(--text-lg);">解除する</h2>
+          <form method="post" action="/settings/security/totp/disable">
+            <input type="hidden" name="_csrf" value="{{ .CSRFToken }}" />
+            <div class="field">
+              <label class="field-label" for="password">現在のパスワード</label>
+              <input class="input" id="password" type="password" name="password" autocomplete="current-password" required />
+            </div>
+            <div class="field">
+              <label class="field-label" for="code">Authenticator アプリの 6 桁コード</label>
+              <input class="input" id="code" type="text" name="code" inputmode="numeric"
+                     autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" required />
+            </div>
+            <button class="btn btn-danger btn-block" type="submit">2 段階認証を解除</button>
+          </form>
+        </section>
+      {{- else }}
+        <section class="auth-card" style="max-width: 560px; margin: 0;">
+          <h2 class="auth-title" style="font-size: var(--text-lg);">1. Authenticator アプリで QR を読み取る</h2>
+          <p class="auth-subtitle">Google Authenticator / 1Password / Authy / Microsoft Authenticator など、TOTP (RFC 6238) に対応するアプリで読み取ってください。</p>
+
+          <figure style="text-align: center; margin: var(--space-4) 0;">
+            <img src="{{ .Extra.QRDataURL }}" alt="TOTP QR コード" width="240" height="240"
+                 style="border: 1px solid var(--color-border); border-radius: var(--radius-md);" />
+            <figcaption style="font-size: var(--text-xs); color: var(--color-text-muted); margin-top: var(--space-2);">
+              QR が読めない場合は、下のシークレットを手動入力してください
+            </figcaption>
+          </figure>
+
+          <details style="margin-bottom: var(--space-6);">
+            <summary style="cursor: pointer; color: var(--color-text-muted); font-size: var(--text-sm);">手動入力用シークレット (base32)</summary>
+            <p style="font-family: var(--font-mono); font-size: var(--text-sm); word-break: break-all; padding: var(--space-3); background: var(--color-surface-2); border-radius: var(--radius-md); margin-top: var(--space-2);">
+              {{ .Extra.SecretBase32 }}
+            </p>
+            <p style="font-size: var(--text-xs); color: var(--color-text-muted); margin-top: var(--space-2);">
+              発行者: {{ .Extra.Issuer }} / アカウント: {{ .Extra.Email }} / アルゴリズム: SHA1 / 桁数: 6 / 周期: 30 秒
+            </p>
+          </details>
+
+          <h2 class="auth-title" style="font-size: var(--text-lg); margin-top: var(--space-6);">2. アプリに表示される 6 桁コードを入力</h2>
+          <form method="post" action="/settings/security/totp/enable" style="margin-top: var(--space-4);">
+            <input type="hidden" name="_csrf" value="{{ .CSRFToken }}" />
+            <div class="field">
+              <label class="field-label" for="code">6 桁コード</label>
+              <input class="input" id="code" type="text" name="code" inputmode="numeric"
+                     autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" required autofocus />
+              <div class="field-hint">アプリのコードは 30 秒ごとに更新されます</div>
+            </div>
+            <button class="btn btn-primary btn-block" type="submit">有効化する</button>
+          </form>
+        </section>
+      {{- end }}
+    </main>
+  </div>
+</div>
+{{- end -}}

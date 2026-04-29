@@ -83,6 +83,18 @@ func (r *UsersRepo) UpdateLastLogin(ctx context.Context, id uuid.UUID, when time
 	return err
 }
 
+// SetTOTP TOTP secret (AES-GCM 暗号化済み) と enabled フラグを更新する。
+// disable する場合は secretEnc=nil, enabled=false を渡す。
+func (r *UsersRepo) SetTOTP(ctx context.Context, id uuid.UUID, secretEnc []byte, enabled bool) error {
+	const q = `UPDATE users SET totp_secret_enc = ?, totp_enabled = ? WHERE id_bin = ?`
+	var enc any
+	if len(secretEnc) > 0 {
+		enc = secretEnc
+	}
+	_, err := r.router.Writer(ctx).ExecContext(ctx, q, enc, enabled, uuidToBin(id))
+	return err
+}
+
 // IncrementFailedLogin ログイン失敗時に呼ぶ。閾値超過なら locked_until を設定する。
 func (r *UsersRepo) IncrementFailedLogin(ctx context.Context, id uuid.UUID, threshold int, lockDuration time.Duration) (newCount int, locked bool, err error) {
 	tx, err := r.router.Writer(ctx).BeginTx(ctx, nil)

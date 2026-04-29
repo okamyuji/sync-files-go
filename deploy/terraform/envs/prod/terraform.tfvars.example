@@ -1,0 +1,18 @@
+# prod 環境のサンプル tfvars。
+# 値はリリース承認者が手動で確定する。CI から prod に apply してはならない。
+
+aws_region = "ap-northeast-1"
+
+image_tag = "PUT-RELEASE-TAG-HERE"
+
+base_url = "https://sync.example.com"
+
+alert_emails = [
+  "ops@example.com",
+  "oncall@example.com",
+]
+
+efs_file_system_id  = ""
+efs_access_point_id = ""
+
+db_instance_class = "db.t4g.small"

@@ -37,7 +37,8 @@ UI_VENDOR_DIR         := internal/ui/static/js
         tools tools-install tools-check ui-vendor ui-vendor-check \
         docker-build docker-build-app docker-build-nginx \
         compose-up compose-down compose-logs \
-        db-migrate db-shell smoke-test clean
+        db-migrate db-shell smoke-test clean \
+        tf-fmt tf-validate tf-plan-dev tf-plan-prod release-smoke release-critical-path
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk -F'[: ]+##[ ]?' '{printf "  %-22s %s\n", $$1, $$2}'
@@ -149,6 +150,31 @@ db-shell: ## ローカル MySQL に CLI 接続
 
 smoke-test: ## healthz へ疎通
 	@curl -fsSL $(BASE_URL)/healthz && echo " OK"
+
+# ===== Terraform =====
+
+tf-fmt: ## deploy/terraform 配下を terraform fmt -recursive
+	terraform -chdir=deploy/terraform fmt -recursive -check
+	@echo "[tf-fmt] ok"
+
+tf-validate: ## dev / prod 両方を validate (バックエンドなしで init → validate)
+	cd deploy/terraform/envs/dev  && terraform init -backend=false -upgrade && terraform validate
+	cd deploy/terraform/envs/prod && terraform init -backend=false -upgrade && terraform validate
+	@echo "[tf-validate] ok"
+
+tf-plan-dev: ## dev 環境 plan (要 backend S3 + AWS credentials)
+	cd deploy/terraform/envs/dev && terraform init && terraform plan -var-file=terraform.tfvars
+
+tf-plan-prod: ## prod 環境 plan (要 backend S3 + AWS credentials、apply は人間承認)
+	cd deploy/terraform/envs/prod && terraform init && terraform plan -var-file=terraform.tfvars
+
+# ===== Release E2E =====
+
+release-smoke: ## Phase 6 リリースゲート: smoke spec のみ実行
+	cd tests/e2e/release && BASE_URL=$(BASE_URL) npx playwright test smoke.spec.ts
+
+release-critical-path: ## Phase 6 リリースゲート: critical-path spec (要 E2E_TEST_EMAIL/PASSWORD)
+	cd tests/e2e/release && BASE_URL=$(BASE_URL) npx playwright test critical-path.spec.ts
 
 clean:
 	rm -rf dist coverage.out coverage.html

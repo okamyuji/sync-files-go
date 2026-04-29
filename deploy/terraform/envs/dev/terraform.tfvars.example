@@ -1,0 +1,23 @@
+# dev 環境のサンプル tfvars。
+#
+# 使い方:
+#   cp terraform.tfvars.example terraform.tfvars
+#   terraform init
+#   terraform apply
+
+aws_region = "ap-northeast-1"
+
+# CI/CD から都度渡す前提なので、デフォルト値は意図的に置かない
+image_tag = "PUT-GIT-SHA-HERE"
+
+base_url = "https://sync-dev.example.com"
+
+alert_emails = [
+  "ops@example.com",
+]
+
+# setup-s3files.sh dev を先に実行してから値を入れる
+efs_file_system_id  = ""
+efs_access_point_id = ""
+
+db_instance_class = "db.t4g.micro"

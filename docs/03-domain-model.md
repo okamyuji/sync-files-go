@@ -598,7 +598,7 @@ Read Replica にはアプリ用の `sync_app` 同名・同 password でレプリ
 
 - **孤児ファイル検出（version レベル）**: 1 日 1 回、`/var/data/owner-*/versions/*/*` を走査し、対応する `file_versions` レコードがないキーを `/_orphan/` へ移動（DB COMMIT 失敗の取り残し）
 - **メタデータ孤児検出**: `file_versions` の各行に対応する S3 Files 上のオブジェクトが存在しない場合を検出してアラート
-- **未参照バージョン検出**: `file_versions` のうち `id_bin` が `files.current_version_id_bin` でも UI からの「過去版アクセス」でも参照されていないものを検出（v2 の容量最適化候補。v1 は履歴として保持）
+- **古いバージョンの prune（90 日経過）**: アプリ層日次バッチ `prune-old-versions` が `file_versions.created_at < NOW() - INTERVAL 90 DAY` かつ `id_bin <> files.current_version_id_bin` のものを `os.Remove(versions/{file_uuid}/{version_uuid})` + `DELETE FROM file_versions` で削除。詳細は [`05-file-operations-logic-tree.md`](./05-file-operations-logic-tree.md) §7.2。S3 lifecycle の `noncurrent_version_expiration` は immutable key 設計では機能しないため、このバッチが唯一の prune 経路。
 - **`upload_sessions.expires_at < now()` のクリーンアップ**: 1 時間ごとに走査し、`tmp/*.part` を削除
 
 ## 7. ストアドプロシージャ vs アプリ層

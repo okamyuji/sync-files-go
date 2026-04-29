@@ -6,16 +6,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// FileVersion は immutable な物理バージョン。
-// storage_key は 'owner-{owner}/versions/{file_id}/{id}' という固定形式（CR-1）。
+// FileVersion immutable な物理バージョン。
+// storage_key 'owner-{owner}/versions/{file_id}/{id}' という固定形式（CR-1）。
 type FileVersion struct {
-	ID                  uuid.UUID
-	FileID              uuid.UUID
-	VersionNumber       int
-	SizeBytes           int64
-	SHA256              []byte
-	StorageKey          string
-	S3VersionID         string
+	ID            uuid.UUID
+	FileID        uuid.UUID
+	VersionNumber int
+	SizeBytes     int64
+	SHA256        []byte
+	StorageKey    string
+	S3VersionID   string
 
 	// 鍵階層 (CR-3)
 	DEKEnc           []byte // KEK で AES-Key-Wrap した DEK

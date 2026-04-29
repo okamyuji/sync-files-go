@@ -9,10 +9,11 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
 	"github.com/okamyuji/sync-files-go/internal/storage"
 )
 
-// TestRoundTrip_Immutable は CR-1 の中核：
+// TestRoundTrip_Immutable CR-1 の中核：
 //  1. tmp に書く
 //  2. versions/{file_id}/{version_id} へ rename で確定
 //  3. 同じキーへの 2 度目の確定は ErrAlreadyExists

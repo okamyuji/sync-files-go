@@ -30,9 +30,13 @@ func GenerateTOTPSecret() (raw []byte, base32Encoded string, err error) {
 	return raw, base32Encoded, nil
 }
 
-// TOTPCode は RFC 6238 互換のコードを生成する（HMAC-SHA1, 6 桁, 30 秒）。
+// TOTPCode RFC 6238 互換のコードを生成する（HMAC-SHA1, 6 桁, 30 秒）。
 func TOTPCode(secret []byte, when time.Time) string {
-	counter := uint64(when.UTC().Unix()) / uint64(TOTPInterval.Seconds())
+	unix := when.UTC().Unix()
+	if unix < 0 {
+		unix = 0 // 1970 年以前の時刻は 0 として扱う
+	}
+	counter := uint64(unix) / uint64(TOTPInterval.Seconds()) // #nosec G115 -- 上で >= 0 に正規化済み
 
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, counter)
@@ -54,7 +58,7 @@ func TOTPCode(secret []byte, when time.Time) string {
 	return fmt.Sprintf("%0*d", TOTPDigits, bin%mod)
 }
 
-// VerifyTOTP は ±1 ステップ（30 秒）の許容で検証する（時計ずれ対策）。
+// VerifyTOTP ±1 ステップ（30 秒）の許容で検証する（時計ずれ対策）。
 func VerifyTOTP(secret []byte, code string, when time.Time) bool {
 	code = strings.TrimSpace(code)
 	if len(code) != TOTPDigits {

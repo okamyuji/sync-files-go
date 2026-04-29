@@ -15,7 +15,7 @@ func TestLoad_RequiresKeys(t *testing.T) {
 	}
 }
 
-// TestLoad_DecodesKeys は base64 エンコードされた鍵が復号されることを確認する。
+// TestLoad_DecodesKeys base64 エンコードされた鍵が復号されることを確認する。
 func TestLoad_DecodesKeys(t *testing.T) {
 	// 32 bytes 以上の鍵（base64）
 	const k = "REDACTED_LOCAL_KEY"
@@ -52,7 +52,7 @@ func TestLoad_ShortKey(t *testing.T) {
 	}
 }
 
-// TestMySQLDSN は DSN が hostname を可変にして組み立てられることを確認する。
+// TestMySQLDSN DSN が hostname を可変にして組み立てられることを確認する。
 func TestMySQLDSN(t *testing.T) {
 	c := &Config{DB: DBConfig{User: "u", Password: "p", Port: 3306, Name: "sync", TLS: "preferred"}}
 	got := c.MySQLDSN("primary.example.local")

@@ -3,8 +3,8 @@
 // DBRouter は設計書 ADR-008 / 02-architecture.md §3.5 を実装する：
 //   - Writer は常に Primary
 //   - Reader は通常 Replica、ただし以下のケースは Primary に切り替える:
-//       * RAW (Read-After-Write) window 内 (5 秒、HTTP リクエストを跨ぐ。HMAC 署名 Cookie で伝播)
-//       * Replica 縮退運転中 (replicaDegraded フラグ)
+//   - RAW (Read-After-Write) window 内 (5 秒、HTTP リクエストを跨ぐ。HMAC 署名 Cookie で伝播)
+//   - Replica 縮退運転中 (replicaDegraded フラグ)
 package repo
 
 import (
@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// DB は database/sql の *sql.DB を抽象化する小さい interface。
+// DB database/sql の *sql.DB を抽象化する小さい interface。
 // Reader/Writer どちらでも実装できる必要のあるメソッドだけ定義する。
 type DB interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
@@ -32,7 +32,7 @@ type DBRouter struct {
 	replicaDegraded atomic.Bool
 }
 
-// NewDBRouter は Primary/Replica を受け取って DBRouter を構築する。
+// NewDBRouter Primary/Replica を受け取って DBRouter を構築する。
 func NewDBRouter(primary, replica DB) *DBRouter {
 	return &DBRouter{primary: primary, replica: replica}
 }
@@ -50,7 +50,7 @@ func (r *DBRouter) Reader(ctx context.Context) DB {
 	return r.replica
 }
 
-// SetReplicaDegraded は Replica 不調時に true、復旧時に false。
+// SetReplicaDegraded Replica 不調時に true、復旧時に false。
 // Phase 3 で監視ループから呼ばれる。
 func (r *DBRouter) SetReplicaDegraded(degraded bool) {
 	r.replicaDegraded.Store(degraded)
@@ -61,17 +61,17 @@ func (r *DBRouter) IsReplicaDegraded() bool {
 	return r.replicaDegraded.Load()
 }
 
-// readAfterWriteUntilKey は RAW window の context キー。
+// readAfterWriteUntilKey RAW window の context キー。
 type readAfterWriteUntilKey struct{}
 
-// WithReadAfterWrite は ctx に「until 時刻まで Reader を Primary に強制する」マーカーを埋める。
+// WithReadAfterWrite ctx に「until 時刻まで Reader を Primary に強制する」マーカーを埋める。
 // HTTP リクエスト間で伝播させるには、加えて HMAC 署名 Cookie が必要（HIGH 修正）。
 // 設計書 ADR-008 を参照。
 func WithReadAfterWrite(ctx context.Context, until time.Time) context.Context {
 	return context.WithValue(ctx, readAfterWriteUntilKey{}, until)
 }
 
-// ReadAfterWriteUntil は ctx に埋まった until 時刻を取り出す（middleware が cookie 検証で使う）。
+// ReadAfterWriteUntil ctx に埋まった until 時刻を取り出す（middleware が cookie 検証で使う）。
 func ReadAfterWriteUntil(ctx context.Context) (time.Time, bool) {
 	t, ok := ctx.Value(readAfterWriteUntilKey{}).(time.Time)
 	return t, ok

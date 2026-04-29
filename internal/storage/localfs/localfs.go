@@ -14,17 +14,18 @@ import (
 	"sync/atomic"
 
 	"github.com/google/uuid"
+
 	"github.com/okamyuji/sync-files-go/internal/storage"
 )
 
-// Storage は os パッケージで実装した storage.Storage。
+// Storage os パッケージで実装した storage.Storage。
 type Storage struct {
 	root string // /var/data 想定
 }
 
-// New は root ディレクトリを指定する。存在しなければ MkdirAll する。
+// New root ディレクトリを指定する。存在しなければ MkdirAll する。
 func New(root string) (*Storage, error) {
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := os.MkdirAll(root, 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir root %s: %w", root, err)
 	}
 	return &Storage{root: root}, nil
@@ -47,23 +48,24 @@ func (s *Storage) versionPath(ownerID, fileID, versionID string) string {
 	return filepath.Join(s.ownerDir(ownerID), "versions", fileID, versionID)
 }
 
-// CreateTemp は tmp/{upload_uuid}.part を作成して Writer を返す。
+// CreateTemp tmp/{upload_uuid}.part を作成して Writer を返す。
 func (s *Storage) CreateTemp(ctx context.Context, ownerID, uploadUUID string) (storage.TempWriter, error) {
 	if uploadUUID == "" {
 		uploadUUID = uuid.NewString()
 	}
 	path := s.tmpPath(ownerID, uploadUUID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir tmp: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// path は ownerID(UUID) + uploadUUID で組み立てた固定パス。外部入力をそのまま使っていない
+	f, err := os.OpenFile(filepath.Clean(path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304
 	if err != nil {
 		return nil, fmt.Errorf("open temp: %w", err)
 	}
 	return &tempWriter{f: f, uploadUUID: uploadUUID, path: path}, nil
 }
 
-// FinalizeVersion は tmp → versions/{file_id}/{version_id} に原子的に rename する。
+// FinalizeVersion tmp → versions/{file_id}/{version_id} に原子的に rename する。
 // 既存があれば ErrAlreadyExists を返す（immutable key の保証）。
 func (s *Storage) FinalizeVersion(ctx context.Context, ownerID, uploadUUID, fileID, versionID string) (string, error) {
 	src := s.tmpPath(ownerID, uploadUUID)
@@ -72,7 +74,7 @@ func (s *Storage) FinalizeVersion(ctx context.Context, ownerID, uploadUUID, file
 	if _, err := os.Stat(dst); err == nil {
 		return "", storage.ErrAlreadyExists
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 		return "", fmt.Errorf("mkdir versions: %w", err)
 	}
 	if err := os.Rename(src, dst); err != nil {
@@ -81,7 +83,7 @@ func (s *Storage) FinalizeVersion(ctx context.Context, ownerID, uploadUUID, file
 	return VersionStorageKey(ownerID, fileID, versionID), nil
 }
 
-// OpenVersion は versions/{file_id}/{version_id} を読み取り用に開く。
+// OpenVersion versions/{file_id}/{version_id} を読み取り用に開く。
 func (s *Storage) OpenVersion(ctx context.Context, ownerID, fileID, versionID string) (io.ReadSeekCloser, error) {
 	path := s.versionPath(ownerID, fileID, versionID)
 	f, err := os.Open(path) // nolint:gosec // path はサーバ側で組み立てた固定パス
@@ -94,7 +96,7 @@ func (s *Storage) OpenVersion(ctx context.Context, ownerID, fileID, versionID st
 	return f, nil
 }
 
-// RemoveVersion は purge バッチから呼ばれる。
+// RemoveVersion purge バッチから呼ばれる。
 func (s *Storage) RemoveVersion(ctx context.Context, ownerID, fileID, versionID string) error {
 	path := s.versionPath(ownerID, fileID, versionID)
 	if err := os.Remove(path); err != nil {

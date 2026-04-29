@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// stubDB は DBRouter のルーティングだけを検証するため、具体的な SQL は実行しないスタブ。
+// stubDB DBRouter のルーティングだけを検証するため、具体的な SQL は実行しないスタブ。
 type stubDB struct{ name string }
 
 func (s *stubDB) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
@@ -18,9 +18,9 @@ func (s *stubDB) ExecContext(context.Context, string, ...any) (sql.Result, error
 	return nil, nil
 }
 func (s *stubDB) BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error) { return nil, nil }
-func (s *stubDB) PingContext(context.Context) error                       { return nil }
+func (s *stubDB) PingContext(context.Context) error                        { return nil }
 
-// TestDBRouter_Routing は ADR-008 の中核ルーティング 4 ケースを検証する。
+// TestDBRouter_Routing ADR-008 の中核ルーティング 4 ケースを検証する。
 //
 // 1. Writer は常に Primary
 // 2. 通常時 Reader は Replica

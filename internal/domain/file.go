@@ -26,7 +26,7 @@ const (
 	FileStateGone    FileState = "gone"
 )
 
-// IsValid は state 列の CHECK 制約と等価。
+// IsValid state 列の CHECK 制約と等価。
 func (s FileState) IsValid() bool {
 	switch s {
 	case FileStateDraft, FileStateActive, FileStateTrashed, FileStatePurged, FileStateGone:
@@ -90,7 +90,7 @@ func (f *File) SoftDelete(now time.Time) error {
 	return nil
 }
 
-// Restore は trashed から active に戻す。
+// Restore trashed から active に戻す。
 func (f *File) Restore(now time.Time) error {
 	if f.State != FileStateTrashed {
 		return ErrInvalidTransition
@@ -101,7 +101,7 @@ func (f *File) Restore(now time.Time) error {
 	return nil
 }
 
-// Purge は trashed から purged に遷移させる（INV-1）。
+// Purge trashed から purged に遷移させる（INV-1）。
 // active から直接呼ぶことはできない。
 func (f *File) Purge(now time.Time) error {
 	if !f.State.CanTransitionTo(FileStatePurged) {
@@ -112,7 +112,7 @@ func (f *File) Purge(now time.Time) error {
 	return nil
 }
 
-// Finalize は purged から gone に遷移させる（v1 では使わないが、バッチ用に予約）。
+// Finalize purged から gone に遷移させる（v1 では使わないが、バッチ用に予約）。
 func (f *File) Finalize(now time.Time) error {
 	if !f.State.CanTransitionTo(FileStateGone) {
 		return ErrInvalidTransition

@@ -13,7 +13,7 @@ import (
 // ShareLink は公開リンク。
 //
 // CR-3/H-3 修正: URL に出すのは TokenHash の元になる base64url ランダム値で、
-// DB は SHA-256(token) のみ保管する（平文は保管しない）。
+// DB SHA-256(token) のみ保管する（平文は保管しない）。
 type ShareLink struct {
 	ID            uuid.UUID
 	FileID        uuid.UUID
@@ -38,7 +38,7 @@ func (s *ShareLink) IsActive(now time.Time) bool {
 	return true
 }
 
-// ExpiresInOption は v1 が許す期限（HIGH 修正：期限なし禁止）。
+// ExpiresInOption v1 が許す期限（HIGH 修正：期限なし禁止）。
 type ExpiresInOption string
 
 const (
@@ -47,7 +47,7 @@ const (
 	ExpiresIn7Days ExpiresInOption = "7d"
 )
 
-// Duration は ExpiresInOption を time.Duration に。
+// Duration ExpiresInOption を time.Duration に。
 func (e ExpiresInOption) Duration() (time.Duration, bool) {
 	switch e {
 	case ExpiresIn1Hour:
@@ -63,7 +63,7 @@ func (e ExpiresInOption) Duration() (time.Duration, bool) {
 // ErrInvalidExpiresIn は許されない期限指定（v1 では「期限なし」も含む）。
 var ErrInvalidExpiresIn = errors.New("invalid expires_in: v1 requires 1h / 1d / 7d")
 
-// GenerateShareToken は base64url 32 bytes ランダム token を生成し、平文と SHA-256 ハッシュを返す。
+// GenerateShareToken base64url 32 bytes ランダム token を生成し、平文と SHA-256 ハッシュを返す。
 //
 // 戻り値:
 //   - tokenPlain: ユーザに渡す URL に含める文字列（DB には保管しない）

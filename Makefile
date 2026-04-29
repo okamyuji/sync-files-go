@@ -23,7 +23,12 @@ TAG           ?= dev
 BASE_URL      ?= http://localhost:8080
 COMPOSE_FILE  := deploy/docker/docker-compose.yml
 
-.PHONY: help build test test-integration lint fmt vet \
+# 品質ゲート用ツールのバージョン（reproducible に固定）
+STATICCHECK_VERSION    ?= 2025.1.1
+GOLANGCI_LINT_VERSION  ?= v1.62.0
+
+.PHONY: help build test test-integration lint fmt vet staticcheck golangci-lint \
+        tools tools-install tools-check \
         docker-build docker-build-app docker-build-nginx \
         compose-up compose-down compose-logs \
         db-migrate db-shell smoke-test clean
@@ -49,12 +54,29 @@ fmt: ## go fmt
 vet: ## go vet
 	$(GO) vet ./...
 
-lint: vet ## staticcheck + vet
-	@if command -v staticcheck >/dev/null 2>&1; then \
-		staticcheck ./...; \
-	else \
-		echo "[lint] staticcheck not installed, skip (install: go install honnef.co/go/tools/cmd/staticcheck@latest)"; \
+staticcheck: tools-check ## staticcheck（fail で 1 を返す）
+	staticcheck -checks=all,-ST1000 ./...
+
+golangci-lint: tools-check ## golangci-lint run（fail で 1 を返す）
+	golangci-lint run ./...
+
+lint: vet staticcheck golangci-lint ## 品質ゲート: vet + staticcheck + golangci-lint を全部走らせる
+	@echo "[lint] all gates passed"
+
+tools-install: ## ツールをローカルに固定バージョンでインストール
+	$(GO) install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
+	@if ! command -v golangci-lint >/dev/null 2>&1 || \
+	    [ "$$(golangci-lint --version 2>/dev/null | awk '{print $$4}')" != "$(GOLANGCI_LINT_VERSION:v%=%)" ]; then \
+		curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+			| sh -s -- -b $$($(GO) env GOPATH)/bin $(GOLANGCI_LINT_VERSION); \
 	fi
+	@echo "[tools] installed staticcheck@$(STATICCHECK_VERSION) and golangci-lint@$(GOLANGCI_LINT_VERSION)"
+
+tools-check: ## 必要ツールが PATH に揃っているか確認
+	@command -v staticcheck >/dev/null 2>&1 || (echo "✗ staticcheck not found. Run: make tools-install" >&2 && exit 1)
+	@command -v golangci-lint >/dev/null 2>&1 || (echo "✗ golangci-lint not found. Run: make tools-install" >&2 && exit 1)
+
+tools: tools-check ## tools-check のエイリアス
 
 docker-build: docker-build-app docker-build-nginx ## app と nginx の両方をビルド
 

@@ -16,29 +16,29 @@ import (
 
 // Storage は本体ストレージの最小 interface。
 type Storage interface {
-	// CreateTemp は tmp/{upload_uuid}.part を生成し、書き込み用の Writer を返す。
+	// CreateTemp tmp/{upload_uuid}.part を生成し、書き込み用の Writer を返す。
 	// 呼び出し側は Close() で fsync を期待してよい。
 	CreateTemp(ctx context.Context, ownerID, uploadUUID string) (TempWriter, error)
 
-	// FinalizeVersion は CreateTemp で書いた一時ファイルを versions/{file_id}/{version_id} に
+	// FinalizeVersion CreateTemp で書いた一時ファイルを versions/{file_id}/{version_id} に
 	// 原子的にリネームする。リネーム後の絶対パス（または storage_key）を返す。
 	// versions 配下のキーは新規。既存があったらエラー。
 	FinalizeVersion(ctx context.Context, ownerID, uploadUUID, fileID, versionID string) (storageKey string, err error)
 
-	// OpenVersion は versions/{file_id}/{version_id} を読み取り用に開く。
+	// OpenVersion versions/{file_id}/{version_id} を読み取り用に開く。
 	OpenVersion(ctx context.Context, ownerID, fileID, versionID string) (io.ReadSeekCloser, error)
 
-	// RemoveVersion は versions/{file_id}/{version_id} を削除する（purge 用）。
+	// RemoveVersion versions/{file_id}/{version_id} を削除する（purge 用）。
 	RemoveVersion(ctx context.Context, ownerID, fileID, versionID string) error
 
-	// RemoveTemp は CreateTemp で開いた一時ファイルを後片付けする（中断時）。
+	// RemoveTemp CreateTemp で開いた一時ファイルを後片付けする（中断時）。
 	RemoveTemp(ctx context.Context, ownerID, uploadUUID string) error
 
-	// VersionExists は versions/{file_id}/{version_id} が存在するか確認する（補正ジョブ用）。
+	// VersionExists versions/{file_id}/{version_id} が存在するか確認する（補正ジョブ用）。
 	VersionExists(ctx context.Context, ownerID, fileID, versionID string) (bool, error)
 }
 
-// TempWriter は CreateTemp の戻り値。Close 時に fsync 相当を期待する。
+// TempWriter CreateTemp の戻り値。Close 時に fsync 相当を期待する。
 type TempWriter interface {
 	io.Writer
 	io.Closer
@@ -46,7 +46,7 @@ type TempWriter interface {
 	UploadUUID() string
 }
 
-// ErrAlreadyExists は versions 配下のキーがすでに存在するときのセンチネル。
+// ErrAlreadyExists versions 配下のキーがすでに存在するときのセンチネル。
 var ErrAlreadyExists = errors.New("storage: target version key already exists")
 
 // ErrNotFound はオブジェクトが存在しない。

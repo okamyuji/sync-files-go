@@ -23,7 +23,7 @@ const (
 	argon2SaltLen     int    = 16
 )
 
-// HashPassword は Argon2id でハッシュ化した文字列（PHC 形式）を返す。
+// HashPassword Argon2id でハッシュ化した文字列（PHC 形式）を返す。
 func HashPassword(plain string) (string, error) {
 	if plain == "" {
 		return "", errors.New("password is empty")
@@ -36,13 +36,16 @@ func HashPassword(plain string) (string, error) {
 	return formatArgon2(salt, key), nil
 }
 
-// VerifyPassword は HashPassword の出力と平文を比較する（定数時間）。
+// VerifyPassword HashPassword の出力と平文を比較する（定数時間）。
 func VerifyPassword(hash, plain string) (bool, error) {
 	salt, key, m, t, p, err := parseArgon2(hash)
 	if err != nil {
 		return false, err
 	}
-	cand := argon2.IDKey([]byte(plain), salt, t, m, p, uint32(len(key)))
+	if len(key) > 1<<24 { // Argon2 KeyLen は 32 bytes 想定。極端に長ければ拒否
+		return false, errors.New("argon2: key length too large")
+	}
+	cand := argon2.IDKey([]byte(plain), salt, t, m, p, uint32(len(key))) // #nosec G115 -- 上で長さ検証済み
 	return subtle.ConstantTimeCompare(cand, key) == 1, nil
 }
 
@@ -66,7 +69,10 @@ func parseArgon2(s string) (salt, key []byte, m, t uint32, p uint8, err error) {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &mP); err != nil {
 		return nil, nil, 0, 0, 0, fmt.Errorf("invalid argon2 params: %w", err)
 	}
-	p = uint8(mP)
+	if mP < 1 || mP > 255 {
+		return nil, nil, 0, 0, 0, fmt.Errorf("argon2 parallelism out of range: %d", mP)
+	}
+	p = uint8(mP) // #nosec G115 -- 上で 1..255 に検証済み
 	salt, err = base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
 		return nil, nil, 0, 0, 0, fmt.Errorf("invalid salt: %w", err)

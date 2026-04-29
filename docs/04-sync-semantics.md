@@ -143,7 +143,7 @@ HX-Trigger: openConflictModal
   "options": [
     { "id": "view_server",      "label": "サーバ版を確認",                "method": "GET",  "url": "/files/8a3f..." },
     { "id": "save_as_copy",     "label": "別名で保存",                     "method": "POST", "url": "/files/8a3f.../save-as-copy" },
-    { "id": "force_overwrite",  "label": "上書き（旧版は30 日復元可）",     "method": "PUT",  "url": "/files/8a3f...", "headers": { "If-Match": "*" }, "warn": true },
+    { "id": "force_overwrite",  "label": "上書き（旧版は90 日復元可）",     "method": "PUT",  "url": "/files/8a3f...", "headers": { "If-Match": "*" }, "warn": true },
     { "id": "cancel",           "label": "キャンセル" }
   ]
 }
@@ -245,16 +245,17 @@ Server → Client: 200 OK
 ECS Scheduled Task が日次で次を実行：
 
 ```
-SELECT id, owner_id, storage_key
+SELECT id_bin AS file_id_bin, owner_id_bin
   FROM files
  WHERE state = 'trashed'
    AND deleted_at < NOW() - INTERVAL 30 DAY
  ORDER BY deleted_at ASC
  LIMIT 1000;
 
-for each row:
-  os.Remove(storage_key)        -- S3 DeleteMarker が付く（バージョニング ON）
-  UPDATE files SET state='purged' WHERE id = ...
+for each file:
+  for each fv in file_versions WHERE file_id_bin = file.id_bin:
+    os.Remove(/var/data/owner-X/versions/{file.id_bin}/{fv.id_bin})
+  UPDATE files SET state='purged' WHERE id_bin = file.id_bin
   INSERT audit_logs (action='file.purge', irreversible=true, ...)
 ```
 

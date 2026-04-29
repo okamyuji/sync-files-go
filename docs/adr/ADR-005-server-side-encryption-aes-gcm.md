@@ -79,7 +79,7 @@ Data Encryption Key (per file version)
 ## 帰結
 
 - 07-security.md §4 に詳細
-- 標準ライブラリの `crypto/aes` + `crypto/cipher` で実装可能（追加依存なし）
+- 暗号プリミティブのみ標準ライブラリ縛りを **明示的に緩める**（Tink Streaming AEAD などの検証済みライブラリを採用）。それ以外の暗号サブシステム（鍵ラップは RFC 3394 を crypto/aes ベースで実装、TOTP は crypto/hmac で自作 など）は標準ライブラリで通す
 - 鍵ローテーション手順は 10-operations.md §6
 - 復号失敗（GCM 認証タグ不一致）はアラート対象とし、CloudWatch にメトリクス化
 

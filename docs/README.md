@@ -33,6 +33,7 @@
 - [ADR-006](./adr/ADR-006-htmx-not-spa.md): フロントは HTMX（SPA を不採用）
 - [ADR-007](./adr/ADR-007-cloudflare-tunnel-not-alb.md): 外部公開は Cloudflare Tunnel + サイドカー nginx（ALB を不採用）
 - [ADR-008](./adr/ADR-008-mysql-read-replica-write-ahead.md): MySQL の読み書き分離（Primary Write / Read Replica）と DBRouter 設計
+- [ADR-009](./adr/ADR-009-immediate-purge-exception.md): 即時物理削除（INV-1 の例外）は運用 CLI のみ
 
 ## 設計の不変条件（最重要）
 

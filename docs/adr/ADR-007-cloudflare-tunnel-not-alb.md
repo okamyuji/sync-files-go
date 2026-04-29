@@ -44,7 +44,7 @@ ECS Fargate のアプリを外部に公開する手段として、4 通りを検
 - **ロードバランサ料金ゼロ**
 - TLS 終端は Cloudflare（証明書管理不要）
 - DDoS 対策が Cloudflare 側で自動
-- VPC は Public Subnet 不要、ECS タスクは Outbound のみ
+- VPC は **Public Subnet を 1〜2 用意し、ECS タスクをそこに配置 + assign_public_ip = true + Inbound 全 deny**（Cloudflare へ outbound するために IGW ルートが必要）。NAT Gateway は不要
 - IP が変動する Fargate でも問題なし（cloudflared が外向きに接続するため）
 
 欠点：
@@ -79,7 +79,7 @@ ECS Fargate のアプリを外部に公開する手段として、4 通りを検
 ## 帰結
 
 - 02-architecture.md と 09-infrastructure-and-deployment.md を改訂
-- ALB / Route 53 / ACM / Public Subnet の構成を削除
+- ALB / Route 53 / ACM の構成を削除（Public Subnet 自体は ECS タスクの outbound のため残す）
 - Cloudflare Tunnel のセットアップ手順を 10-operations.md に追加
 - ヘルスチェックは ECS タスクヘルスチェックのみ（ALB ヘルスチェックは無いため）
 - nginx の設定例：

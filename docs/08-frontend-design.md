@@ -28,7 +28,7 @@
                                 │   ├── /login
                                 │   ├── /signup
                                 │   ├── /totp/setup
-                                │   └── /password-reset
+                                │   └── /recovery        (リカバリコード入力。v1 では Email リセットなし)
                                 │
                                 │── 主要画面
                                 │   ├── /                   ホーム（ファイル一覧）
@@ -49,9 +49,9 @@
                                 │   └── /settings/sessions      アクティブセッション
                                 │
                                 │── 公開リンク（未認証）
-                                │   ├── /share/{id}                プレビュー
-                                │   ├── /share/{id}/password       パスワード入力
-                                │   └── /share/{id}/download       ダウンロード
+                                │   ├── /share/{token}                プレビュー
+                                │   ├── /share/{token}/password       パスワード入力
+                                │   └── /share/{token}/download       ダウンロード
                                 │
                                 └── システム
                                     ├── /healthz

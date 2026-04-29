@@ -20,7 +20,7 @@
    ├── Cloudflare Edge :443    ← TLS 1.3 終端、Cloudflare DDoS 緩和
    │     └ Tunnel経由 → cloudflared (outbound接続のみ)
    │       └ nginx :8443 (TLS 再終端) → app :8080
-   ├── /share/{id}             ← 公開リンク（未認証アクセス、Cloudflare 経由）
+   ├── /share/{token}             ← 公開リンク（未認証アクセス、Cloudflare 経由）
    └── (それ以外は認証必須)
 
 [内部 VPC 内のみ]

@@ -44,14 +44,20 @@ func NewServer(d *Deps) http.Handler {
 	mux.HandleFunc("GET /healthz", healthzHandler())
 	mux.HandleFunc("GET /readyz", readyzHandler(d))
 
-	// 認証フロー (Phase 5 でテンプレート連携)
+	// 認証フロー
 	mux.HandleFunc("GET /login", loginPageHandler(d))
-	mux.HandleFunc("POST /login", loginPostHandler(d))
+	mux.HandleFunc("POST /signup", signupHandler(d))
+	mux.HandleFunc("POST /login", loginPostJSONHandler(d))
 	mux.HandleFunc("POST /logout", logoutHandler(d))
 
-	// 認証必須エンドポイントは RequireAuth でラップする (Phase 4 以降で具体的 handler を追加)
+	// 認証必須エンドポイント (Phase 5 でテンプレートに置き換え)
 	authMW := middleware.RequireAuth(d.Cfg.SessionKey, sessionLookup(d), "/login")
 	mux.Handle("GET /", authMW(filesIndexPlaceholder(d)))
+	mux.Handle("GET /api/files", authMW(listFilesHandler(d)))
+	mux.Handle("POST /api/files", authMW(uploadFileHandler(d)))
+	mux.Handle("GET /api/files/{id}", authMW(downloadFileHandler(d)))
+	mux.Handle("DELETE /api/files/{id}", authMW(deleteFileHandler(d)))
+	mux.Handle("POST /api/files/{id}/restore", authMW(restoreFileHandler(d)))
 
 	// 共通ミドルウェア (chain)
 	chain := middleware.Chain(mux,
@@ -126,14 +132,6 @@ func loginPageHandler(d *Deps) http.HandlerFunc {
 <h1>sync-files-go</h1>
 <p>ログイン画面（Phase 5 で実装）</p>
 </body></html>`))
-	}
-}
-
-// loginPostHandler 認証ロジックの結線は Phase 5 / handler_auth.go で行う。
-// ここは構造を見せるための占位実装。
-func loginPostHandler(d *Deps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "login flow under construction (Phase 5)", http.StatusNotImplemented)
 	}
 }
 

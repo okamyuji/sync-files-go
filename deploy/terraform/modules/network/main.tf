@@ -105,7 +105,7 @@ resource "aws_security_group" "ec2" {
 
 resource "aws_vpc_security_group_ingress_rule" "ec2_http" {
   security_group_id = aws_security_group.ec2.id
-  description       = "HTTP from internet (Let's Encrypt ACME http-01 + redirect)"
+  description       = "HTTP from internet (ACME http-01 + redirect)"
   ip_protocol       = "tcp"
   from_port         = 80
   to_port           = 80

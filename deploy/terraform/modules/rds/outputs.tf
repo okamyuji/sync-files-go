@@ -3,9 +3,10 @@ output "primary_endpoint" {
   value       = aws_db_instance.primary.address
 }
 
+// Replica が無効化されている場合は Primary を返す（縮退運転）
 output "replica_endpoint" {
-  description = "Read Replica エンドポイント"
-  value       = aws_db_instance.replica.address
+  description = "Read Replica エンドポイント。create_replica=false なら Primary と同じ"
+  value       = var.create_replica ? aws_db_instance.replica[0].address : aws_db_instance.primary.address
 }
 
 output "primary_port" {
@@ -21,7 +22,8 @@ output "primary_identifier" {
 }
 
 output "replica_identifier" {
-  value = aws_db_instance.replica.identifier
+  description = "Replica DBInstanceIdentifier。create_replica=false なら Primary と同じ"
+  value       = var.create_replica ? aws_db_instance.replica[0].identifier : aws_db_instance.primary.identifier
 }
 
 output "master_user_secret_arn" {

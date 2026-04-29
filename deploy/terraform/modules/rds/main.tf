@@ -45,9 +45,16 @@ resource "aws_db_parameter_group" "app" {
   name        = "sync-files-go-${var.env}"
   description = "sync-files-go custom params (ngram_token_size, conn limits)"
 
+  // static パラメタは apply_method=pending-reboot 必須
   parameter {
-    name  = "ngram_token_size"
-    value = "2"
+    name         = "ngram_token_size"
+    value        = "2"
+    apply_method = "pending-reboot"
+  }
+  parameter {
+    name         = "binlog_format"
+    value        = "ROW"
+    apply_method = "pending-reboot"
   }
   parameter {
     name  = "max_connections"
@@ -56,11 +63,6 @@ resource "aws_db_parameter_group" "app" {
   parameter {
     name  = "require_secure_transport"
     value = "ON"
-  }
-  // バイナリログを行ベースで保つ（Read Replica の整合性向上）
-  parameter {
-    name  = "binlog_format"
-    value = "ROW"
   }
 
   tags = merge(local.tags, { Name = "sync-files-go-${var.env}-pg" })
@@ -71,7 +73,7 @@ resource "aws_db_parameter_group" "app" {
 resource "aws_db_instance" "primary" {
   identifier     = "sync-files-go-${var.env}-primary"
   engine         = "mysql"
-  engine_version = "8.0.39"
+  engine_version = "8.0.45"
   instance_class = var.db_instance_class
 
   allocated_storage     = 20
@@ -81,7 +83,7 @@ resource "aws_db_instance" "primary" {
   kms_key_id            = aws_kms_key.rds.arn
 
   db_name                     = "sync"
-  username                    = "rdsadmin"
+  username                    = "syncadmin"
   manage_master_user_password = true
 
   multi_az               = true
@@ -95,7 +97,7 @@ resource "aws_db_instance" "primary" {
 
   deletion_protection          = var.env == "prod"
   copy_tags_to_snapshot        = true
-  performance_insights_enabled = true
+  performance_insights_enabled = var.enable_performance_insights
   monitoring_interval          = 60
   monitoring_role_arn          = aws_iam_role.rds_monitoring.arn
 
@@ -115,14 +117,17 @@ resource "aws_db_instance" "primary" {
 
 // === Read Replica ===
 
+// Read Replica は `manage_master_user_password=true` の MySQL Primary には作れない（AWS 制約）。
+// dev/test では create_replica=false で省略。prod で必要なら別途 master password を Secrets で管理して有効化する。
 resource "aws_db_instance" "replica" {
+  count                  = var.create_replica ? 1 : 0
   identifier             = "sync-files-go-${var.env}-replica-1"
   replicate_source_db    = aws_db_instance.primary.identifier
   instance_class         = var.db_instance_class
   publicly_accessible    = false
   vpc_security_group_ids = [var.rds_security_group_id]
 
-  performance_insights_enabled = true
+  performance_insights_enabled = var.enable_performance_insights
   monitoring_interval          = 60
   monitoring_role_arn          = aws_iam_role.rds_monitoring.arn
 

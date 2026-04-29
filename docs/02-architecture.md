@@ -188,11 +188,9 @@ func (r *DBRouter) Reader(ctx context.Context) *sql.DB {
     return r.replica
 }
 
+// HIGH 修正: ctx だけでは HTTP リクエストを跨いで RAW window を伝播できない。
+// Cookie 経由で「次の数秒は Primary 読み」を指示する。
 type readAfterWriteUntilKey struct{}
-
-func WithReadAfterWrite(ctx context.Context) context.Context {
-    return context.WithValue(ctx, readAfterWriteUntilKey{}, time.Now().Add(5*time.Second))
-}
 
 func (r *DBRouter) forcePrimary(ctx context.Context) bool {
     until, ok := ctx.Value(readAfterWriteUntilKey{}).(time.Time)
@@ -200,7 +198,44 @@ func (r *DBRouter) forcePrimary(ctx context.Context) bool {
 }
 ```
 
-リポジトリは Writer / Reader を受け取り、ハンドラは「どちらに行くか」を細かく知らない。詳細は [ADR-008](./adr/ADR-008-mysql-read-replica-write-ahead.md)。
+ミドルウェアと書き込み完了処理：
+
+```go
+// internal/http/middleware/raw.go
+const rawCookieName = "__Host-sync_raw_until"
+
+// 書き込み直後のレスポンスで cookie を発行
+func SetRawCookie(w http.ResponseWriter, sessionID uuid.UUID, until time.Time, signKey []byte) {
+    payload := fmt.Sprintf("%d", until.Unix())
+    sig := hmacSHA256(signKey, sessionID[:], []byte(payload))
+    http.SetCookie(w, &http.Cookie{
+        Name:     rawCookieName,
+        Value:    payload + "." + base64url(sig),
+        Path:     "/",
+        HttpOnly: true,
+        Secure:   true,
+        SameSite: http.SameSiteLaxMode,
+        Expires:  until.Add(time.Second),
+    })
+}
+
+// 受信時：cookie を検証して ctx に焼き付ける
+func RAWMiddleware(signKey []byte) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            if c, err := r.Cookie(rawCookieName); err == nil {
+                if until, ok := verifyRaw(c.Value, currentSession(r).ID, signKey); ok && time.Now().Before(until) {
+                    ctx := context.WithValue(r.Context(), readAfterWriteUntilKey{}, until)
+                    r = r.WithContext(ctx)
+                }
+            }
+            next.ServeHTTP(w, r)
+        })
+    }
+}
+```
+
+これにより、書き込み完了 → リダイレクト先のリクエスト → さらに次の HTMX 部分更新まで、5 秒間は `DBRouter.Reader` が Primary を返す。詳細は [ADR-008](./adr/ADR-008-mysql-read-replica-write-ahead.md)。
 
 ### 3.6 RDS for MySQL
 
@@ -223,9 +258,8 @@ func (r *DBRouter) forcePrimary(ctx context.Context) bool {
   ```
   /var/data/
     ├── owner-{user_id}/
-    │   ├── current/{file_uuid}
-    │   ├── tmp/{upload_uuid}.part
-    │   └── versions/{file_uuid}/v{N}
+    │   ├── versions/{file_uuid}/{version_uuid}    ← 全バージョンを immutable に保存（CR-1）
+    │   └── tmp/{upload_uuid}.part                  ← アップロード途中
     └── _system/...
   ```
 - バックエンド S3 バケット：バージョニング ON、SSE-S3 既定有効、ライフサイクル設定（90 日後の旧版完全消去）
@@ -275,9 +309,10 @@ func (r *DBRouter) forcePrimary(ctx context.Context) bool {
                                               │
                                               SELECT files ────────────> [MySQL]
                                               │
-                                              open(/var/data/.../current/{uuid}) ──> [S3 Files]
+                                              JOIN file_versions ON current_version_id_bin
+                                              open(/var/data/.../versions/{file_uuid}/{version_uuid}) ──> [S3 Files]
                                               │
-                                              AES-GCM decrypt → stream
+                                              Streaming AEAD decrypt → stream
 ```
 
 ### 4.3 上書き（OCC）
@@ -310,7 +345,8 @@ S3 Files 上のファイルには手をつけない（INV-1）。
 [EventBridge cron(0 18 * * ? *)] ──RunTask──> [ECS gc task] ──Reader=Primary──> [MySQL]
    SELECT * FROM files WHERE state='trashed' AND deleted_at < now() - INTERVAL 30 DAY
    for each:
-     os.Remove(/var/data/.../current/{uuid})  # S3 DeleteMarker 付与
+     for each fv in file_versions WHERE file_id_bin = files.id_bin:
+       os.Remove(/var/data/.../versions/{file_uuid}/{fv.id_bin})  # S3 DeleteMarker 付与
      UPDATE files SET state='purged' (Primary)
      INSERT audit_logs (irreversible=true)
 ```
@@ -356,15 +392,17 @@ S3 Files 上のファイルには手をつけない（INV-1）。
 | dev | ap-northeast-1 | 検証（任意） |
 | prod | ap-northeast-1 | 本番 |
 
-### 6.2 ネットワーク（簡素化）
+### 6.2 ネットワーク（HIGH 修正：Public/Private を整合）
 
-- VPC: `10.0.0.0/16`
-- app-subnet (1〜2 AZ): ECS Fargate / RDS Primary・Replica / VPC エンドポイント
-  - 10.0.10.0/24 (AZ-a)
-  - 10.0.11.0/24 (AZ-c) ← RDS standby と Read Replica
-- 外部公開：Cloudflare Tunnel が outbound のみ。Public Subnet は不要
-- IGW: ECS タスクが Cloudflare API へ outbound するためにのみ使用（ENI に Public IP を付けて IGW 経由）。SG で Inbound 全 deny
-  - もしくは VPC NAT / Egress-only IGW を使うが、コスト最小なら直接 IGW + SG 厳格化が現実的
+| 用途 | サブネット種別 | CIDR (例) | 配置 |
+|---|---|---|---|
+| ECS Fargate タスク | **Public Subnet**（IGW ルート） | 10.0.10.0/24 (AZ-a), 10.0.11.0/24 (AZ-c) | タスクには `assign_public_ip = true`。Inbound は SG で全 deny。Outbound のみ IGW 経由で Cloudflare へ |
+| RDS Primary / Standby / Read Replica | Private Subnet（IGW ルートなし） | 10.0.20.0/24 (AZ-a), 10.0.21.0/24 (AZ-c) | 外部到達不可 |
+| VPC エンドポイント（interface） | Private Subnet | 上記 RDS 用と共用 | ECS から AWS API へは VPC エンドポイント経由 |
+
+- 外部公開：Cloudflare Tunnel が outbound のみ。受信ポートは一切開けない
+- Public IP を ECS タスクに付与する必要があるのは、Cloudflare Tunnel のために IGW へ outbound 接続するため（Fargate は public subnet + public IP + IGW route が外向き接続の前提。NAT Gateway を入れない代替案）
+- セキュリティはタスクの SG（Inbound 全 deny）と Cloudflare 側 + nginx 側の二段で担保する
 - VPC エンドポイント（gateway / interface）：
   - S3 (gateway)
   - S3 Files (interface)

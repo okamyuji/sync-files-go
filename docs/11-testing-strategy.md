@@ -2,14 +2,36 @@
 
 > 「機能要件を満たす」だけでなく、**不変条件（INV-1〜INV-5）を継続的に証明し続ける** ためのテスト戦略。
 
+## 0. 二段階のテスト実施
+
+本システムは **ローカル Docker** での反復可能なテストを主軸にし、最終的に **Terraform で本番（または staging）にデプロイした実環境で実ブラウザ統合テスト** を必須とする。
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ ステージ A: ローカル Docker 内テスト（反復・速い）            │
+│   - 単体テスト（Go test）                                     │
+│   - 統合テスト（testcontainers-go: MySQL Primary+Replica）    │
+│   - E2E（Playwright）はローカル docker compose 起動で実行    │
+└──────────────────────────────────────────────────────────────┘
+                          ↓ all green
+┌──────────────────────────────────────────────────────────────┐
+│ ステージ B: 本番/staging Terraform デプロイ後の実ブラウザ統合 │
+│   - terraform apply で ECS Fargate / RDS / S3 Files / cloudflared をデプロイ │
+│   - 実ブラウザ（Playwright headed もしくは手動）で必須シナリオ実行 │
+│   - smoke + 損失防止クリティカルシナリオが pass で初めてリリース可 │
+└──────────────────────────────────────────────────────────────┘
+```
+
+「ローカルだけで通った」状態をリリース基準にしない。実 AWS 上の S3 Files / Cloudflare Tunnel / RDS Multi-AZ / Read Replica 経由で確認するまでは未完了。
+
 ## 1. テストピラミッド
 
 ```
                 ┌──────────┐
-                │   E2E    │  ← Playwright で UI 駆動。〜30 シナリオ
+                │   E2E    │  ← Playwright (local docker) +  実ブラウザ (本番) で確認
                 │  (slow)  │
                 ├──────────┤
-                │  統合    │  ← 実 MySQL (Primary+Replica) + ローカル FS。〜200 シナリオ
+                │  統合    │  ← ローカル Docker (testcontainers-go) で MySQL Primary+Replica + FS
                 │  (medium)│
                 ├──────────┤
                 │  単体    │  ← Go test。〜500 ケース、80% カバレッジ
@@ -17,7 +39,7 @@
                 └──────────┘
 ```
 
-下に行くほど数が多く実行が速く、上に行くほど少なく遅い。
+下に行くほど数が多く実行が速く、上に行くほど少なく遅い。**統合・E2E はまずローカル Docker で完結させ、最後に本番環境で再走させる**のがポリシー。
 
 ## 2. 単体テスト
 
@@ -158,6 +180,9 @@ func TestUploadDelete_RoundTrip(t *testing.T) {
 - Playwright（Node.js ベース、TypeScript で記述）
 - 主要シナリオ 30 程度
 - CI でブラウザバージョンを固定
+- **実行環境を 2 つ持つ**：
+  - ローカル：`docker compose up` で起動した一式（mysql + app + nginx）に対する Playwright（headless）。CI で常時実行。
+  - 本番/staging：`terraform apply` 完了後、実ブラウザで（Playwright headed もしくは手動）必須シナリオを再走。Cloudflare Tunnel・S3 Files・RDS Multi-AZ・Read Replica 経由の挙動を確認する。
 
 ### 4.2 主要シナリオ
 
@@ -352,7 +377,9 @@ export default function () {
 
 テストデータには本物のような個人情報を入れない（合成データ）。テスト用の暗号鍵は固定値（コードに含めて OK、本物ではないことを明示）。
 
-## 12. CI パイプライン
+## 12. CI / CD パイプライン（2 段ゲート）
+
+### 12.1 PR ゲート（ローカル Docker 内で完結）
 
 ```
 PR open
@@ -363,22 +390,45 @@ PR open
   ↓
 3. unit test + coverage check
   ↓
-4. integration test (testcontainers-go で mysql:8.0 を Primary/Replica として起動)
+4. integration test (testcontainers-go で mysql:8.0 Primary+Replica)
   ↓
 5. build docker images (app, nginx)
   ↓
 6. trivy image scan (両方のイメージ)
   ↓
-7. e2e test (subset)  ← merge 前必須
+7. local docker e2e test (docker compose up + Playwright headless)
   ↓
 8. report: lint + coverage + e2e screenshots
-  ↓
-ブランチ保護でマージ可能になる
-
-main へマージ後:
-  - terraform plan を投稿（人間レビュー）
-  - 承認 → terraform apply
 ```
+
+ここまでが green でなければマージ不可。
+
+### 12.2 リリースゲート（本番/staging に terraform apply 後の実環境テスト）
+
+```
+main へマージ
+  ↓
+1. terraform plan を投稿（人間レビュー）
+  ↓
+2. 承認 → terraform apply（staging or prod）
+  ↓
+3. ECS が Rolling Update / cloudflared が Tunnel 再接続
+  ↓
+4. smoke test（curl / 外部 BASE_URL）
+  ↓
+5. 実ブラウザ E2E（Playwright headed もしくは手動）
+   - ログイン → アップロード（小） → ダウンロード（小）
+   - アップロード（500MB tus.io レジューム）
+   - 同名上書き OCC：成功と 409 衝突モーダル
+   - 削除 → ゴミ箱 → 復元
+   - 公開リンク（期限・パスワード）
+   - SSE 通知の動作（別ブラウザでアップロード → 通知バッジ）
+   - 物理削除（時計操作テストは local のみ。本番では mock 不可なため省略）
+  ↓
+6. 必須シナリオ全 pass で初めてリリース完了
+```
+
+「ローカルで通った」を**リリース基準にしない**。本番環境の Cloudflare Tunnel・S3 Files・RDS Multi-AZ + Read Replica の挙動は local docker と異なる場合があるため、必ず実環境で確認する。
 
 ## 13. 受け入れ基準（Definition of Done）
 
@@ -386,7 +436,8 @@ main へマージ後:
 
 - [ ] 単体テストでカバー（カバレッジ低下なし）
 - [ ] 統合テストでカバー（必要な場合）
-- [ ] E2E シナリオに追加（ユーザ向け機能の場合）
+- [ ] **ローカル Docker での E2E が green**（ユーザ向け機能の場合）
+- [ ] **本番/staging へ Terraform デプロイし、実ブラウザで対応シナリオを通す**（リリースゲート）
 - [ ] 不変条件 INV-1〜INV-5 と矛盾しないことを点検
 - [ ] アクセシビリティ axe-core で違反なし
 - [ ] gosec / govulncheck でクリティカル違反なし

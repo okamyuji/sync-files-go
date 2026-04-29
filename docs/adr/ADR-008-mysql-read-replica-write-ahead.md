@@ -26,26 +26,34 @@
 | ゴミ箱一覧 | Replica | 同上 |
 | 過去版一覧 | Replica | 同上 |
 | 公開リンクのアクセス履歴 | Replica | 同上 |
-| 公開リンク経由のファイル取得 | Replica | 公開後に多少古くても可 |
 
 ### Primary に残す読み取り
 
 | 画面 / 処理 | 接続先 | 理由 |
 |---|---|---|
 | アップロード時の OCC チェック | Primary | 強整合性が必要 |
-| ダウンロード（自分のアップロード直後） | Primary（read-after-write window） | 自分の書き込みを直後に見るユースケース |
+| ダウンロード（自分のアップロード直後） | Primary（RAW window） | 自分の書き込みを直後に見るユースケース |
 | 認証セッション照合 | Primary | 整合性最優先 |
 | 公開リンク作成 / 取り消し | Primary | 書き込みフロー |
+| **公開リンク経由のアクセス可否判定**（HIGH 修正） | **Primary** | revoked_at / expires_at / 元ファイルの deleted_at を即時反映する必要。Replica 遅延中に取り消し済みリンクが有効に見える事故を防ぐ |
+| **公開リンク経由のファイル本体取得** | Primary | 上の判定と同トランザクション内で取得し、整合性を保つ |
 
 ### 書き込み
 
 すべて Primary。これは絶対。
 
-### read-after-write window
+### read-after-write window（HIGH 修正：HTTP リクエスト跨ぎで伝播）
 
-- 書き込み完了後、context に `withReadAfterWrite(ctx)` で 5 秒の有効期限を埋め込む
-- この期間内は `forcePrimary(ctx) = true` とし、Reader 接続でも Primary に向かわせる
+- 書き込み完了後、レスポンスで **`__Host-sync_raw_until` Cookie** を発行（5 秒有効、HMAC 署名付き）
+- 後続のリクエストはミドルウェアが Cookie を検証し、ctx に until を焼き付ける
+- `DBRouter.Reader` は ctx の until を見て forcePrimary を返す
+- これにより `POST → 302 redirect → GET` のような複数リクエストにまたがる RAW を実現
 - 5 秒は Replica 遅延の通常値から決定（実測で見直し）
+
+ヘッダの代わりに Cookie を採るのは：
+- HTMX の `hx-redirect` などでクライアント主導の遷移時にも自動で送られる
+- HMAC 署名でクライアントが値を改ざんできない（セッションID + until の組み合わせを署名対象に）
+- 期限切れで自動失効
 
 ### DBRouter の Go コード骨子
 

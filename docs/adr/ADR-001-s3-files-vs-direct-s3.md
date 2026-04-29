@@ -59,7 +59,7 @@
 ## 帰結
 
 - 「サイズが大きいファイルのアップロード時、S3 マルチパート + 署名付き URL でブラウザから直接 S3 へ」という最適化は v1 では採用しない（NG-7 に記載）。アップロードはサーバ経由 + tus.io レジューム
-- ECS タスクのモントリンプ条件として S3 Files Access Point の作成手順を運用 Runbook に記載
+- ECS タスクのマウント要件として S3 Files Access Point の作成手順を運用 Runbook に記載
 - ローカル開発では `hostPath` ボリュームで POSIX FS を模擬。MinIO は使わない
 
 ## リンク

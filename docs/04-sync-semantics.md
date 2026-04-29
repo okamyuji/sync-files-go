@@ -27,7 +27,7 @@
 
 | ID | 不変条件 | 意味 |
 |---|---|---|
-| INV-1 | 物理削除は二段階 | 「削除」は常にソフト削除。物理削除は (a) ユーザの明示操作 OR (b) 30 日経過 の AND |
+| INV-1 | 物理削除は二段階 | active からの即時物理削除は禁止。trashed 状態を経た上で、(a) パスワード再入力済みの明示 purge 操作 OR (b) 30 日経過バッチ のいずれかでのみ物理削除可 |
 | INV-2 | 書き込みは累積 | 上書きでも S3 バージョニングで旧版が必ず残る |
 | INV-3 | 自動マージ禁止 | サーバはバイトレベルでも文字列レベルでもマージしない |
 | INV-4 | 未完了は本番に影響しない | 一時領域 → 完了時にだけ確定 |
@@ -87,30 +87,34 @@ func handleUpload(ctx, w, r) {
         return http.Error(w, "precondition required", 428)
     }
 
-    // ここから実書き込み
+    // ここから実書き込み（immutable versions key へ書く、CR-1 修正）
+    versionID := uuid.New()  // version_uuid
     enc, err := encryptStream(body, kek(ctx, sess.UserID))
     tmpKey := tmpKeyFor(sess.UserID, uploadUUID)
     if err := writeWithFsync(tmpKey, enc); err != nil {
-        return // tmp は削除される
+        return // tmp は7日 TTL で削除
     }
 
-    finalKey := finalKeyFor(sess.UserID, fileUUID)
+    // versions/{file_uuid}/{version_uuid} は新規キー。既存を上書きしない
+    finalKey := versionsKeyFor(sess.UserID, fileUUID, versionID)
     if err := os.Rename(tmpKey, finalKey); err != nil {
         return
     }
 
-    versionID := uuid.New()
     versionNumber := nextVersionNumber(tx, fileID)
-
-    tx.Exec(ctx, `INSERT INTO file_versions ...`, ...)
-    tx.Exec(ctx, `UPDATE files SET current_version_id = $1, updated_at = now() ...`, versionID)
+    tx.Exec(ctx, `INSERT INTO file_versions (id_bin, file_id_bin, version_number, storage_key, ...) ...`, versionID, fileID, versionNumber, finalKey, ...)
+    tx.Exec(ctx, `UPDATE files SET current_version_id_bin = ?, updated_at = NOW(6) WHERE id_bin = ?`, versionID, fileID)
     tx.Exec(ctx, `INSERT INTO audit_logs ...`, ...)
 
     if err := tx.Commit(); err != nil {
-        // 重要: ファイルはすでに current/ にある。
-        // 補正ジョブが「メタデータがない孤児ファイル」を検出して /_orphan に隔離する
+        // versions/{file_uuid}/{versionID} は無参照のまま残るだけ。
+        // files.current_version_id_bin は旧版のまま → 既存ユーザは旧版を読み続ける。
+        // 補正ジョブが「file_versions に対応行がない versions/*/* キー」を検出して /_orphan/ へ移動。
         return
     }
+
+    // RAW window 用の cookie を発行（HIGH 修正、§7）
+    setRawCookie(w, sess.ID, time.Now().Add(5*time.Second))
 
     w.Header().Set("ETag", versionID.String())
     w.WriteHeader(204)

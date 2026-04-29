@@ -35,16 +35,21 @@
 
 ```
 User {
-  id_bin        BINARY(16) (主キー、UUID v4 を BIN(16) で保管)
-  email         VARCHAR(320) UNIQUE  (NFC 正規化済み)
-  password_hash VARCHAR(255)         (Argon2id)
-  totp_secret_enc VARBINARY(128)     (AES-GCM で暗号化済み)
-  totp_enabled  TINYINT(1)
-  recovery_codes_hash JSON            (Argon2id 文字列の配列)
-  created_at    DATETIME(6)
-  last_login_at DATETIME(6) nullable
-  locked_until  DATETIME(6) nullable
-  failed_login_count INT default 0
+  id_bin              BINARY(16) (主キー、UUID v4 を BIN(16) で保管)
+  email               VARCHAR(320) UNIQUE  (NFC 正規化済み)
+  password_hash       VARCHAR(255)         (Argon2id)
+  totp_secret_enc     VARBINARY(256)        (AES-GCM 暗号文)
+  totp_secret_header  VARBINARY(64)         (AES-GCM の nonce + tag)
+  totp_enabled        TINYINT(1)
+  recovery_codes_hash JSON                  (Argon2id 文字列の配列)
+  -- 鍵階層
+  kek_enc             VARBINARY(80)         (KEK を Master Key で AES-Key-Wrap)
+  kek_id_bin          BINARY(16)            (KEK の論理 ID)
+  master_key_version  INT                   (どの世代の Master Key で wrap したか)
+  created_at          DATETIME(6)
+  last_login_at       DATETIME(6) nullable
+  locked_until        DATETIME(6) nullable
+  failed_login_count  INT default 0
 }
 ```
 
@@ -54,23 +59,25 @@ User {
 
 ```
 File {
-  id_bin             BINARY(16) (主キー)
+  id_bin             BINARY(16) (主キー、論理ファイル ID = file_uuid)
   owner_id_bin       BINARY(16)
   parent_folder_id_bin BINARY(16) nullable
   name               VARCHAR(255)  (NFC 正規化済み)
   path               VARCHAR(2048) (フルパス)
-  current_version_id_bin BINARY(16) nullable
-  size_bytes         BIGINT
+  path_hash          VARBINARY(32) (SHA-256(NFC(path))、検索・索引用)
+  current_version_id_bin BINARY(16) nullable (file_versions.id_bin への論理参照)
+  size_bytes         BIGINT      (current_version の size のキャッシュ)
   content_type       VARCHAR(255)
-  storage_key        VARCHAR(512)  (S3 Files 上のキー)
+  sha256             VARBINARY(32) (current_version の sha256 のキャッシュ)
+  state              ENUM('draft','active','trashed','purged','gone')
+  active_marker      VARBINARY(32) GENERATED  (state='active' のときだけハッシュ、CR-2 用)
   created_at         DATETIME(6)
   updated_at         DATETIME(6)
   deleted_at         DATETIME(6) nullable
-  state              ENUM('draft','active','trashed','purged','gone')   -- 採択: ENUM か CHECK 制約
-  sha256             VARBINARY(32)
-  encryption_key_id_bin BINARY(16)
 }
 ```
+
+**File は論理エンティティ**。ファイル本体（バイト列）は `file_versions` 経由でしか参照しない。`storage_key` も `encryption_key_id_bin` も File テーブルには持たない（CR-1 修正により versions/ 配下の immutable key で管理するため）。
 
 不変条件：
 - `state = 'active'` ⇒ `deleted_at IS NULL`
@@ -78,22 +85,45 @@ File {
 - `state = 'purged'` ⇒ `deleted_at < NOW() - INTERVAL 30 DAY`
 - `state = 'draft'` のレコードは `current_version_id_bin IS NULL` を許す
 
-MySQL の制約事項：
-- 部分インデックス（PostgreSQL の `WHERE` 付き）が無いため、「同名 active ファイルの一意性」は **アプリ層で `SELECT FOR UPDATE` + INSERT で担保** する（`(owner_id_bin, path)` の UNIQUE は不採用）
-- `DEFERRABLE` 外部キーが無いため、`current_version_id_bin` は外部キー制約を張らず、アプリ層で整合性を保つ（あるいは「先に file 行を INSERT し、後で UPDATE」する手順）
+MySQL での「同名 active 一意性」の表現（CR-2 修正）：
+
+「同一オーナー・同一フォルダ配下で、`state='active'` のファイル名が一意」を **DB 制約で守る**。MySQL は条件付きインデックスがないので、生成列でこれを表現する：
+
+```sql
+-- files テーブルに次の生成列と UNIQUE を追加（後述の §4 スキーマで反映済み）
+active_marker VARBINARY(32) AS (
+  CASE WHEN state = 'active'
+       THEN UNHEX(SHA2(CONCAT_WS(':', HEX(owner_id_bin),
+                                       COALESCE(HEX(parent_folder_id_bin),''),
+                                       name), 256))
+       ELSE NULL
+  END
+) STORED,
+UNIQUE KEY uniq_files_active_name (active_marker)
+```
+
+- 同一オーナー・同フォルダ・同名で `state='active'` の行は同じハッシュ値を持ち、UNIQUE 制約でDB側が二重 INSERT を拒否する
+- `state` が `trashed` / `purged` / `draft` / `gone` の行は NULL となり、UNIQUE 制約から除外される（MySQL は NULL を一意性検査で重複として扱わない）
+- アプリ側のロックは並列パフォーマンスのために残すが、DB 制約が最終防衛線
+
+`current_version_id_bin` は外部キー制約を張らず（`DEFERRABLE` 不在のため）、アプリ層で整合性を保つ：「`file_versions` に行を INSERT してから `files.current_version_id_bin` を UPDATE する」順序を厳守。
 
 ### 2.3 FileVersion
 
 ```
 FileVersion {
-  id_bin             BINARY(16) (主キー)
+  id_bin             BINARY(16) (主キー、= version_uuid)
   file_id_bin        BINARY(16) FOREIGN KEY → files.id_bin
   version_number     INT
   size_bytes         BIGINT
   sha256             VARBINARY(32)
-  storage_key        VARCHAR(512)
-  s3_version_id      VARCHAR(128) nullable
-  encryption_key_id_bin BINARY(16)
+  storage_key        VARCHAR(512)             ('owner-{user}/versions/{file_uuid}/{version_uuid}', immutable)
+  s3_version_id      VARCHAR(128) nullable     (S3 バケットバージョニング ID。レイヤ分離のため記録)
+  -- 鍵関連
+  dek_enc            VARBINARY(80)             (DEK を該当ユーザの KEK で AES-Key-Wrap)
+  kek_id_bin         BINARY(16)                (どの KEK で wrap したか)
+  encryption_scheme  VARCHAR(32)               (例: 'tink-aead-streaming-aes-256-gcm-hkdf-1mb')
+  encryption_header  VARBINARY(64)             (スキーム固有のヘッダ。base nonce / salt / version 等)
   created_at         DATETIME(6)
   created_by_session_id_bin BINARY(16) nullable
   deleted_by_user    TINYINT(1) default 0
@@ -135,21 +165,28 @@ FileTag {
 }
 ```
 
-### 2.6 ShareLink
+### 2.6 ShareLink（HIGH 修正：URL token を内部 ID と分離）
 
 ```
 ShareLink {
-  id_bin           BINARY(16)
+  id_bin           BINARY(16)                  -- 内部 ID。外部 URL には出さない
   file_id_bin      BINARY(16) FOREIGN KEY → files.id_bin
   created_by_bin   BINARY(16) FOREIGN KEY → users.id_bin
-  password_hash    VARCHAR(255) nullable  (Argon2id)
-  expires_at       DATETIME(6) nullable
+  token_hash       VARBINARY(32) UNIQUE        -- SHA-256(URL token)。URL に出す token そのものは保管しない
+  password_hash    VARCHAR(255) nullable       (Argon2id)
+  expires_at       DATETIME(6) NOT NULL        -- v1 で「期限なし」を許さない (HIGH 修正)
   created_at       DATETIME(6)
   revoked_at       DATETIME(6) nullable
   view_count       BIGINT default 0
   download_count   BIGINT default 0
 }
 ```
+
+URL は `/share/<base64url-32-bytes-random>`。サーバは受信した token を SHA-256 してから DB の `token_hash` で索引引き。これにより：
+
+- DB 内部 ID と URL を分離（漏洩時の影響範囲を限定）
+- `token_hash` のみ保管なので DB 漏洩でも token 自体は復元できない
+- v1 では「期限なし」リンクを禁止（最大 7 日に制限）
 
 ### 2.7 ShareLinkAccess
 
@@ -265,9 +302,14 @@ CREATE TABLE users (
   id_bin              BINARY(16) PRIMARY KEY,
   email               VARCHAR(320) NOT NULL,
   password_hash       VARCHAR(255) NOT NULL,
-  totp_secret_enc     VARBINARY(256),
+  totp_secret_enc     VARBINARY(256),                      -- TOTP secret を AES-GCM で暗号化保管
+  totp_secret_header  VARBINARY(64),                       -- TOTP secret の AES-GCM nonce + tag (header)
   totp_enabled        TINYINT(1) NOT NULL DEFAULT 0,
   recovery_codes_hash JSON NOT NULL,
+  -- CR-3: 鍵階層
+  kek_enc             VARBINARY(80) NOT NULL,              -- KEK を Master Key で AES-Key-Wrap (RFC 3394)
+  kek_id_bin          BINARY(16) NOT NULL,                 -- このユーザの KEK の論理 ID
+  master_key_version  INT NOT NULL DEFAULT 1,              -- KEK が暗号化された Master Key の世代
   created_at          DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   last_login_at       DATETIME(6),
   locked_until        DATETIME(6),
@@ -296,33 +338,46 @@ CREATE TABLE files (
   parent_folder_id_bin    BINARY(16),
   name                    VARCHAR(255) NOT NULL,
   path                    VARCHAR(2048) NOT NULL,
+  path_hash               VARBINARY(32) NOT NULL,                 -- SHA-256(NFC(path))、検索・索引用 (MEDIUM 修正)
   current_version_id_bin  BINARY(16),
   size_bytes              BIGINT NOT NULL,
   content_type            VARCHAR(255),
-  storage_key             VARCHAR(512) NOT NULL,
   sha256                  VARBINARY(32) NOT NULL,
-  encryption_key_id_bin   BINARY(16) NOT NULL,
   state                   ENUM('draft','active','trashed','purged','gone') NOT NULL,
   created_at              DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   updated_at              DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   deleted_at              DATETIME(6),
-  KEY idx_files_owner_path  (owner_id_bin, path(255)),
-  KEY idx_files_owner_state (owner_id_bin, state, updated_at DESC),
-  KEY idx_files_deleted_at  (state, deleted_at),
+  -- CR-2: state='active' の同名重複を DB 制約で防ぐ生成列
+  active_marker VARBINARY(32) AS (
+    CASE WHEN state = 'active' THEN
+      UNHEX(SHA2(CONCAT_WS(':', HEX(owner_id_bin),
+                                  COALESCE(HEX(parent_folder_id_bin),''),
+                                  name), 256))
+    ELSE NULL END
+  ) STORED,
+  UNIQUE KEY uniq_files_active_name (active_marker),
+  KEY idx_files_owner_path_hash (owner_id_bin, path_hash),
+  KEY idx_files_owner_state     (owner_id_bin, state, updated_at DESC),
+  KEY idx_files_deleted_at      (state, deleted_at),
   FULLTEXT KEY ft_files_name (name) WITH PARSER ngram,
   CONSTRAINT fk_files_owner FOREIGN KEY (owner_id_bin) REFERENCES users(id_bin)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- ファイルバージョン
+-- ファイルバージョン (immutable)
 CREATE TABLE file_versions (
-  id_bin                  BINARY(16) PRIMARY KEY,
+  id_bin                  BINARY(16) PRIMARY KEY,        -- = version_uuid、storage_key の末尾と一致
   file_id_bin             BINARY(16) NOT NULL,
   version_number          INT NOT NULL,
   size_bytes              BIGINT NOT NULL,
   sha256                  VARBINARY(32) NOT NULL,
-  storage_key             VARCHAR(512) NOT NULL,
+  storage_key             VARCHAR(512) NOT NULL,         -- 'owner-{user}/versions/{file_uuid}/{version_uuid}'
   s3_version_id           VARCHAR(128),
-  encryption_key_id_bin   BINARY(16) NOT NULL,
+  -- CR-3: DEK の保管 (file_version 単位で 1 個)
+  dek_enc                 VARBINARY(80) NOT NULL,        -- DEK を該当ユーザの KEK で AES-Key-Wrap
+  kek_id_bin              BINARY(16) NOT NULL,           -- どの KEK で wrap されたか (鍵ローテーション履歴)
+  -- CR-4: AES-GCM ストリーム暗号化のヘッダ（nonce 戦略・チャンク長などをバージョン化）
+  encryption_scheme       VARCHAR(32) NOT NULL,          -- 'tink-aead-streaming-aes-256-gcm-hkdf-1mb' 等
+  encryption_header       VARBINARY(64) NOT NULL,        -- スキーム固有のヘッダ（base nonce / salt / version 等）
   created_at              DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   created_by_session_id_bin BINARY(16),
   deleted_by_user         TINYINT(1) NOT NULL DEFAULT 0,
@@ -349,17 +404,19 @@ CREATE TABLE file_tags (
   CONSTRAINT fk_ft_tag  FOREIGN KEY (tag_id_bin)  REFERENCES tags(id_bin)  ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 共有リンク
+-- 共有リンク (HIGH 修正: token を内部 ID と分離)
 CREATE TABLE share_links (
   id_bin           BINARY(16) PRIMARY KEY,
   file_id_bin      BINARY(16) NOT NULL,
   created_by_bin   BINARY(16) NOT NULL,
+  token_hash       VARBINARY(32) NOT NULL,        -- SHA-256(URL に露出する 32 bytes random token)
   password_hash    VARCHAR(255),
-  expires_at       DATETIME(6),
+  expires_at       DATETIME(6) NOT NULL,           -- v1 では NOT NULL (期限なしを禁止)
   created_at       DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   revoked_at       DATETIME(6),
   view_count       BIGINT NOT NULL DEFAULT 0,
   download_count   BIGINT NOT NULL DEFAULT 0,
+  UNIQUE KEY uniq_share_links_token (token_hash),
   KEY idx_share_links_file (file_id_bin),
   KEY idx_share_links_active (file_id_bin, revoked_at, expires_at),
   CONSTRAINT fk_share_links_file FOREIGN KEY (file_id_bin) REFERENCES files(id_bin) ON DELETE CASCADE
@@ -472,56 +529,76 @@ Read Replica にはアプリ用の `sync_app` 同名・同 password でレプリ
 
 `utf8mb4`（4 バイト UTF-8、絵文字対応）。照合は `utf8mb4_0900_ai_ci`（MySQL 8 デフォルト、UCA 9.0 ベース）。NFC 正規化はアプリ層で行う。
 
-## 5. S3 Files 上のファイル配置規則
+## 5. S3 Files 上のファイル配置規則（**immutable versions only**）
 
 ```
 /var/data/                                      ← S3 Files マウントポイント
 ├── owner-{user_uuid}/
-│   ├── current/{file_uuid}                     ← 現行版の暗号文
-│   ├── tmp/{upload_session_uuid}.part          ← アップロード中の一時
-│   └── versions/{file_uuid}/v{N}               ← 旧版
+│   ├── versions/{file_uuid}/{version_uuid}     ← すべての版を immutable に保存（書いたら触らない）
+│   └── tmp/{upload_session_uuid}.part          ← アップロード中の一時
 └── _system/
     ├── kek/                                    ← 鍵階層 (07-security 参照)
     └── healthcheck.txt
 ```
 
+> **CR-1 修正の根拠**: 当初は `current/{file_uuid}` を可変キーとし、上書き時に `os.Rename` で切り替える設計だった。しかし「DB COMMIT 失敗 + S3 上のファイルは新版に書き換わり済み」という孤児が発生し、`files` レコードは存在するため孤児検出にも引っかからない致命的な不整合が起きた。本設計ではすべての版を `versions/{file_uuid}/{version_uuid}` という **immutable key** に書き、「現行版の指し示し」は **DB の `files.current_version_id_bin` 列だけ**で表現する。これにより：
+> - DB COMMIT が成功して初めて新版が「現行」になる
+> - DB COMMIT 失敗時、旧版の参照は変わらず、新版オブジェクトはどの DB 行からも参照されない無参照状態 → 補正ジョブで容易に検出可能（`versions/*/*` を走査し、どの `file_versions` 行からも参照されていないキーを `/_orphan/` へ移動）
+> - 「`current/{uuid}`」というキーは存在しない。ダウンロードは常に `SELECT current_version_id_bin FROM files` → `open(versions/{file_uuid}/{version_uuid})` の二段で行う
+
 設計ポイント：
 
-- **ファイル名は UUID 固定**：リネームを O(1) で
-- **ソフト削除中もファイル本体は `current/` に残す**：`deleted_at` を立てるだけ
-- **物理削除（purge）時のみ S3 オブジェクトに DeleteMarker を付与**
-- **バージョンは `versions/{file_uuid}/v{N}` に明示的に保存**
-- 注意: NFS v4.1+ の `os.Rename` は同 FS 内アトミックの規定。AWS 実装の挙動は実機検証（[`13`](./13-risks-and-open-questions.md) §3）
+- **ファイル名は UUID v4**：`file_uuid` はファイルの論理 ID、`version_uuid` はバージョンの ID（共に Primary Key）
+- **リネームは O(1)**：DB の `path` / `name` / `parent_folder_id_bin` のみ更新。S3 キーは不変
+- **ソフト削除中もファイル本体は `versions/` に残す**：`files.deleted_at` を立てるだけ
+- **物理削除（purge）時のみ**`versions/{file_uuid}/*` を `os.Remove` で削除（S3 DeleteMarker が付与される。バージョニングはバケット側で別途持つ）
+- 「現行版」「旧版」という物理的な区別は S3 上には存在しない。すべては DB の `files.current_version_id_bin` 経由
+
+参考: NFS v4.1+ の `os.Rename` は同 FS 内アトミックだが、本設計では tmp → versions/ への単一の rename 後はそのキーを上書きしないため、rename のアトミック性に対する依存度が下がる（[`13`](./13-risks-and-open-questions.md) §3）。
 
 ## 6. メタデータと S3 Files の整合性
 
 ファイル本体（S3 Files）とメタデータ（MySQL）は別リソース。原子的トランザクションは張れない。本設計では以下のルールで整合性を保つ：
 
-### 6.1 書き込み順（commit-after-write）
+### 6.1 書き込み順（commit-after-write、immutable versions）
 
 ```
-1. Acquire OCC (Primary 上で SELECT FOR UPDATE current version + check If-Match)
-2. Write encrypted bytes to /var/data/.../tmp/{upload_uuid}
-3. fsync(2)  -- NFS では best-effort、後段の SHA-256 検証で補強
-4. os.Rename(tmp → current/{file_uuid})  -- 同 FS 内、原子的
-5. BEGIN; INSERT file_versions; UPDATE files SET current_version_id_bin = new; INSERT audit_log; COMMIT;
-6. （DB COMMIT 失敗時）孤児ファイル補正ジョブが /_orphan に隔離
-7. レスポンスを返す前に context.WithReadAfterWrite(ctx) を仕込み、
-   直後の取得は Primary を読む（Replica 遅延の影響を回避）
+1. version_uuid := uuid.New()
+2. Acquire OCC (Primary 上で SELECT FOR UPDATE files... + check If-Match)
+3. Write encrypted bytes to /var/data/owner-X/tmp/{upload_uuid}
+4. fsync(2)  -- NFS では best-effort、後段の SHA-256 検証で補強
+5. os.Rename(tmp/{upload_uuid} → versions/{file_uuid}/{version_uuid})
+   -- 同 FS 内、原子的、かつ versions/ 配下は以後不変（書き換えない）
+6. BEGIN
+     INSERT INTO file_versions (id_bin=version_uuid, file_id_bin=file_uuid, ...);
+     UPDATE files SET current_version_id_bin = version_uuid, updated_at = NOW(6), ... WHERE id_bin = file_uuid;
+     INSERT INTO audit_logs ...;
+   COMMIT;
+7. （DB COMMIT 失敗時）versions/{file_uuid}/{version_uuid} は無参照のまま残る。
+   補正ジョブが「file_versions に対応行がない versions/* キー」を検出して /_orphan/ へ隔離。
+   この時点でも files.current_version_id_bin は旧版のままなので、復元は不要 (旧版が引き続き「現行」)。
+8. レスポンスを返す際に Set-Cookie で raw_until=now+5s（ハッシュ署名つき）を発行。
+   後続リクエストはこの cookie を見て forcePrimary を判定する（HIGH 修正、§DBRouter）。
 ```
+
+**重要**: ステップ 5 は `versions/{file_uuid}/{version_uuid}` という **新規キー** への書き込みであり、既存キーを上書きしない。これにより、DB COMMIT に対する S3 側の状態は常に「新キーが追加された／何もされていない」のいずれかであり、混線が起きない。
 
 ### 6.2 読み取り
 
 ```
-1. SELECT files (DBRouter.Reader = 通常は Replica、RAW window 中は Primary)
-2. open(/var/data/.../current/{file_uuid})
-3. AES-GCM 復号して stream
+1. SELECT files.current_version_id_bin (DBRouter.Reader = 通常は Replica、RAW window 中は Primary)
+2. SELECT file_versions.storage_key WHERE id_bin = current_version_id_bin
+3. open(/var/data/owner-X/versions/{file_uuid}/{version_uuid})
+4. AES-GCM 復号して stream
 ```
+
+ステップ 1 と 2 を 1 SQL の JOIN で行ってもよい。「現行版」を物理的に表すのは DB の参照のみ。
 
 ### 6.3 補正ジョブ（reconciliation）
 
-- **孤児ファイル検出**: 1 日 1 回、`/var/data/owner-*/current/` を走査し、対応する `files` レコードがないものを `/_orphan/` へ移動
-- **メタデータ孤児検出**: `files` で `state = 'active'` だが S3 Files 上のオブジェクトが存在しないものを検出してアラート
+- **孤児ファイル検出（version レベル）**: 1 日 1 回、`/var/data/owner-*/versions/*/*` を走査し、対応する `file_versions` レコードがないキーを `/_orphan/` へ移動（DB COMMIT 失敗の取り残し）
+- **メタデータ孤児検出**: `file_versions` の各行に対応する S3 Files 上のオブジェクトが存在しない場合を検出してアラート
+- **未参照バージョン検出**: `file_versions` のうち `id_bin` が `files.current_version_id_bin` でも UI からの「過去版アクセス」でも参照されていないものを検出（v2 の容量最適化候補。v1 は履歴として保持）
 - **`upload_sessions.expires_at < now()` のクリーンアップ**: 1 時間ごとに走査し、`tmp/*.part` を削除
 
 ## 7. ストアドプロシージャ vs アプリ層

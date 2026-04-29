@@ -1,0 +1,31 @@
+{{- /*
+  base.gohtml  共通レイアウト。各ページは `content` ブロックを定義する。
+  ヘッダや CSP nonce、フラッシュメッセージはここに集約する。
+*/ -}}
+{{- define "base.gohtml" -}}
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <title>{{ if .Title }}{{ .Title }} · {{ end }}sync-files-go</title>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/reset.css" />
+  <link rel="stylesheet" href="/static/css/layout.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
+  <script src="/static/js/htmx.min.js" defer nonce="{{ .CSPNonce }}"></script>
+  <script src="/static/js/htmx-ext-sse.js" defer nonce="{{ .CSPNonce }}"></script>
+  <script src="/static/js/app.js" defer nonce="{{ .CSPNonce }}"></script>
+</head>
+<body>
+  {{- if .Flash }}
+    <div class="notif-rail" role="status" aria-live="polite">
+      <div class="notif" data-kind="{{ .Flash.Kind }}">{{ .Flash.Message }}</div>
+    </div>
+  {{- end }}
+  {{ block "content" . }}{{ end }}
+</body>
+</html>
+{{- end -}}

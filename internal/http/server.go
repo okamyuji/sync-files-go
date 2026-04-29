@@ -1,15 +1,17 @@
 // Package http は HTTP サーバの組み立てを行う。
 //
 // 設計書 02-architecture.md §3.4 / 04-sync-semantics.md / 05-file-operations-logic-tree.md に対応。
-// Phase 3 ではミドルウェアと最低限の handler を結線する（auth・files・share の本体は後続フェーズ）。
+// Phase 5 で UI レンダリング層 (internal/ui) を結線し、HTML フローと JSON フローを分離している。
 package http
 
 import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +21,7 @@ import (
 	"github.com/okamyuji/sync-files-go/internal/repo"
 	"github.com/okamyuji/sync-files-go/internal/repo/mysql"
 	"github.com/okamyuji/sync-files-go/internal/storage"
+	"github.com/okamyuji/sync-files-go/internal/ui"
 )
 
 // Deps サーバ全体の依存性。main からまとめて注入する。
@@ -27,6 +30,7 @@ type Deps struct {
 	Logger  *slog.Logger
 	Router  *repo.DBRouter
 	Storage storage.Storage
+	UI      *ui.Renderer
 
 	Users        *mysql.UsersRepo
 	Sessions     *mysql.SessionsRepo
@@ -40,19 +44,34 @@ type Deps struct {
 func NewServer(d *Deps) http.Handler {
 	mux := http.NewServeMux()
 
-	// ヘルスチェック (Phase 1 から拡張: /readyz は DB / Storage の到達確認)
+	// ヘルスチェック
 	mux.HandleFunc("GET /healthz", healthzHandler())
 	mux.HandleFunc("GET /readyz", readyzHandler(d))
 
+	// 静的アセット (embed.FS、Cache-Control immutable + 1y)
+	if d.UI != nil {
+		mux.Handle("GET /static/", staticAssetsHandler(ui.StaticFS()))
+	}
+
 	// 認証フロー
-	mux.HandleFunc("GET /login", loginPageHandler(d))
-	mux.HandleFunc("POST /signup", signupHandler(d))
-	mux.HandleFunc("POST /login", loginPostJSONHandler(d))
+	if d.UI != nil {
+		mux.HandleFunc("GET /login", loginPageHTMLHandler(d))
+		mux.HandleFunc("GET /signup", signupPageHTMLHandler(d))
+		mux.HandleFunc("POST /login", loginPostFormHandler(d))
+		mux.HandleFunc("POST /signup", signupPostFormHandler(d))
+	}
+	// JSON 互換エンドポイント（API クライアント / 統合テスト用）
+	mux.HandleFunc("POST /api/signup", signupHandler(d))
+	mux.HandleFunc("POST /api/login", loginPostJSONHandler(d))
 	mux.HandleFunc("POST /logout", logoutHandler(d))
 
-	// 認証必須エンドポイント (Phase 5 でテンプレートに置き換え)
+	// 認証必須エンドポイント
 	authMW := middleware.RequireAuth(d.Cfg.SessionKey, sessionLookup(d), "/login")
-	mux.Handle("GET /", authMW(filesIndexPlaceholder(d)))
+	if d.UI != nil {
+		mux.Handle("GET /", authMW(homePageHandler(d)))
+	} else {
+		mux.Handle("GET /", authMW(filesIndexFallback()))
+	}
 	mux.Handle("GET /api/files", authMW(listFilesHandler(d)))
 	mux.Handle("POST /api/files", authMW(uploadFileHandler(d)))
 	mux.Handle("GET /api/files/{id}", authMW(downloadFileHandler(d)))
@@ -63,7 +82,7 @@ func NewServer(d *Deps) http.Handler {
 	mux.Handle("POST /api/files/{id}/share-links", authMW(createShareLinkHandler(d)))
 	mux.Handle("DELETE /api/share-links/{id}", authMW(revokeShareLinkHandler(d)))
 
-	// 公開リンク（未認証側）。H-2: 判定は ShareLinksRepo が Primary を読む。
+	// 公開リンク（未認証側）。ShareLinksRepo が Primary を読むので RAW window 不要。
 	mux.HandleFunc("GET /share/{token}", publicShareDownloadHandler(d))
 
 	// 共通ミドルウェア (chain)
@@ -77,6 +96,25 @@ func NewServer(d *Deps) http.Handler {
 		middleware.RAWMiddleware(d.Cfg.SessionKey, middleware.SessionIDForRAW(d.Cfg.SessionKey)),
 	)
 	return chain
+}
+
+// staticAssetsHandler  embed.FS を /static/ で配信する。
+//
+// `Cache-Control: public, max-age=31536000, immutable` を強く付ける（バージョニング URL 前提）。
+// 8 §9 に従い、フォントや CSS の長期キャッシュを許す。
+func staticAssetsHandler(fsys fs.FS) http.Handler {
+	fileServer := http.FileServerFS(fsys)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /static/foo → /foo
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = strings.TrimPrefix(r.URL.Path, "/static")
+		if r2.URL.Path == "" {
+			r2.URL.Path = "/"
+		}
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		fileServer.ServeHTTP(w, r2)
+	})
 }
 
 // sessionLookup auth middleware に渡す「sessionID から有効 session を引く」関数。
@@ -108,19 +146,16 @@ func readyzHandler(d *Deps) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 
-		// Primary
 		if err := d.Router.Writer(ctx).PingContext(ctx); err != nil {
 			d.Logger.WarnContext(ctx, "readyz: primary ping failed", "err", err)
 			http.Error(w, "primary db not ready", http.StatusServiceUnavailable)
 			return
 		}
-		// Replica（縮退中なら primary と同じだが、Ping は冪等）
 		if err := d.Router.Reader(ctx).PingContext(ctx); err != nil {
 			d.Logger.WarnContext(ctx, "readyz: reader ping failed", "err", err)
 			http.Error(w, "reader db not ready", http.StatusServiceUnavailable)
 			return
 		}
-		// Storage（VersionExists で自分のキーを引く＝マウント疎通確認）
 		if _, err := d.Storage.VersionExists(ctx, "_system", "_health", "probe"); err != nil {
 			d.Logger.WarnContext(ctx, "readyz: storage probe failed", "err", err)
 			http.Error(w, "storage not ready", http.StatusServiceUnavailable)
@@ -128,17 +163,6 @@ func readyzHandler(d *Deps) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ready\n"))
-	}
-}
-
-// loginPageHandler Phase 5 でテンプレートに置き換える、最小プレースホルダ。
-func loginPageHandler(d *Deps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><html><body>
-<h1>sync-files-go</h1>
-<p>ログイン画面（Phase 5 で実装）</p>
-</body></html>`))
 	}
 }
 
@@ -156,8 +180,8 @@ func logoutHandler(d *Deps) http.HandlerFunc {
 	}
 }
 
-// filesIndexPlaceholder Phase 5 でテンプレート連携に置き換え。
-func filesIndexPlaceholder(d *Deps) http.HandlerFunc {
+// filesIndexFallback UI Renderer が無いときの素朴な応答（統合テスト用）。
+func filesIndexFallback() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess, _ := middleware.SessionFrom(r.Context())
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

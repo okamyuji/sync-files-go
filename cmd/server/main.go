@@ -23,6 +23,7 @@ import (
 	"github.com/okamyuji/sync-files-go/internal/repo"
 	"github.com/okamyuji/sync-files-go/internal/repo/mysql"
 	"github.com/okamyuji/sync-files-go/internal/storage/localfs"
+	"github.com/okamyuji/sync-files-go/internal/ui"
 )
 
 func main() {
@@ -63,11 +64,17 @@ func run() error {
 		return fmt.Errorf("init storage: %w", err)
 	}
 
+	uiRenderer, err := ui.Load()
+	if err != nil {
+		return fmt.Errorf("load ui templates: %w", err)
+	}
+
 	deps := &hsrv.Deps{
 		Cfg:          cfg,
 		Logger:       logger,
 		Router:       router,
 		Storage:      store,
+		UI:           uiRenderer,
 		Users:        mysql.NewUsersRepo(router),
 		Sessions:     mysql.NewSessionsRepo(router),
 		Files:        mysql.NewFilesRepo(router),

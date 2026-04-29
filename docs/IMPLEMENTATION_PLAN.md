@@ -89,12 +89,13 @@ internal/
 
 ### 受け入れ基準
 
-- [ ] DBRouter が Writer / Reader / RAW window / 縮退運転 の 4 ケースを正しく分岐（単体テスト）
+- [ ] DBRouter が Writer / Reader / RAW window / 縮退運転 の 4 ケースを正しく分岐（単体テスト、in-memory DB stub）
 - [ ] File 状態遷移 (draft → active → trashed → purged → gone) が enum + 関数で表現される（単体テスト）
-- [ ] Tink Streaming AEAD で 1MB / 100MB のラウンドトリップが通る（2GB は時間がかかるので Phase 5 の E2E に回す）
-- [ ] active_marker UNIQUE が同名 active 二重 INSERT を拒否する（**Phase 2 内で testcontainers-go 統合テスト**）
-- [ ] OCC (`If-Match`) ロジックが §04 §4.2 の 7 分岐を網羅（単体テスト）
+- [ ] Tink Streaming AEAD で 1MB / 100MB のラウンドトリップが通る（純関数テスト、2GB は Phase 5 の E2E に回す）
+- [ ] OCC (`If-Match`) ロジックが §04 §4.2 の 7 分岐を網羅（単体テスト、in-memory repo を使う）
 - [ ] 単体カバレッジ >= 80%（go test -cover、CI で「下げない」をチェック）
+
+**注**: `active_marker` UNIQUE のように **実 MySQL 接続が必要な確認** は Phase 2 では行わず、Phase 3 の統合テスト（testcontainers-go）で検証する（責務分離）。
 
 ## Phase 3: HTTP 層・ミドルウェア + 統合テスト
 
@@ -127,6 +128,7 @@ cmd/server/
 
 tests/integration/                          # testcontainers-go ベース
 ├── helpers.go                              # mysql Primary+Replica 起動
+├── schema_test.go                          # active_marker UNIQUE が同名 active 二重 INSERT を拒否することを検証（Phase 2 から移動）
 ├── upload_test.go                          # OCC 7 分岐 + コンフリクトコピー
 ├── delete_test.go                          # ソフト削除 + ゴミ箱経由 + 即時 purge は不可
 ├── share_test.go                           # token 検証 + Primary 必須
@@ -291,8 +293,9 @@ tests/e2e/release/                          # 本番/staging への terraform ap
 - [ ] EventBridge Schedule で `gc` (ゴミ箱物理削除)、`prune-old-versions`、`reconcile` の 3 ジョブが日次起動する設定
 - [ ] S3 Files の作成は `deploy/scripts/setup-s3files.sh` を README に明記（Terraform AWS provider 未対応分）
 - [ ] Cloudflare Tunnel トークンは Secrets Manager から取得
-- [ ] **staging で `terraform apply` を実行し、`tests/e2e/release` の smoke と critical-path が green**（リリースゲート）
-- [ ] 実ブラウザ（Playwright headed もしくは手動）で `11 §12.2` の必須シナリオが pass
+- [ ] **staging で `terraform apply` を実行し、`tests/e2e/release` の smoke と critical-path が Playwright headed で green**（自動リリースゲート）
+- [ ] **加えて、人間オペレータが実ブラウザ（Chrome / Safari / Mobile Safari の 3 ブラウザ）で `11 §12.2` の必須シナリオを手動実行し、UX を確認する**（手動リリースゲート、必須）
+- [ ] 上記 2 つが両方 green で初めて prod へ apply 可
 
 ## ステージング
 

@@ -71,25 +71,29 @@
    ├── 対象が active        → §1.W (旧版は file_versions / S3 バージョニングで保持)
    └── 対象なし             → 412
 
-§1.W 実書き込み (write phase)
+§1.W 実書き込み (write phase, immutable versions key)
+   ├── version_uuid := uuid.New()
    ├── tmp/{upload_uuid}.part にストリーム書き込み
    │     ├── サイズ超過 (> 2GB) → 413 Payload Too Large
    │     ├── ディスク満杯       → 507 Insufficient Storage
    │     └── 通信切断           → tmp は残置 (7 日 TTL で掃除)
    ├── SHA-256 を計算しながら書き込み (ストリーム)
-   ├── ファイル末尾で AES-GCM の認証タグを検証
+   ├── 各 AES-GCM チャンクの認証タグ + 末尾の終端タグを検証
    ├── fsync (best-effort)
-   ├── 第二 OCC ロック取得 (current_version_id を再確認)
+   ├── 第二 OCC ロック取得 (現行 current_version_id_bin を再確認)
    │     └── ここでも不一致なら 409 (実書き込み中に別端末が更新したケース)
-   ├── os.Rename(tmp/.. → current/{file_uuid})
+   ├── os.Rename(tmp/{upload_uuid}.part → versions/{file_uuid}/{version_uuid})
+   │     ↑ versions 配下は新規キーなので上書きしない、CR-1 修正
    │     └── 失敗時 (まれ): tmp を残し、500 を返す。補正ジョブで処理
    ├── BEGIN
-   │     INSERT file_versions ...
-   │     UPDATE files SET current_version_id, updated_at, sha256, size_bytes ...
+   │     INSERT file_versions (id_bin=version_uuid, storage_key=versions/.../version_uuid, ...)
+   │     UPDATE files SET current_version_id_bin = version_uuid, updated_at = NOW(6), sha256, size_bytes ...
    │     INSERT audit_logs ...
    │   COMMIT
-   │     └── COMMIT 失敗時 (まれ): current/ にファイルが残るが files メタが古いまま
-   │          → 補正ジョブが孤児として検出 → /_orphan に隔離
+   │     └── COMMIT 失敗時: versions/{file_uuid}/{version_uuid} は無参照のまま残る
+   │          files.current_version_id_bin は旧版のまま → ユーザ影響ゼロ
+   │          補正ジョブが「file_versions に対応行がない versions/*/* キー」を検出 → /_orphan
+   ├── Set-Cookie で raw_until=now+5s を発行 (HIGH 修正、後続リクエストの RAW window)
    └── 204 No Content / 201 Created を返す
        ETag: <new_version_id>
        X-File-Version: <number>
@@ -116,7 +120,8 @@ SELECT files WHERE id = $1 AND owner_id = $2 AND state = 'active'
        └── 不一致 → 続行
          │
          ▼
-   open(/var/data/.../current/{file_uuid})
+   SELECT file_versions WHERE id_bin = files.current_version_id_bin
+   open(/var/data/owner-X/versions/{file_uuid}/{version_uuid})
        ├── ENOENT → 500 + アラート (メタとストレージの不整合)
        └── OK →
          │
@@ -272,8 +277,9 @@ SELECT files FOR UPDATE WHERE id = $1
    └── trashed →
          │
          ▼
-   os.Remove(/var/data/.../current/{file_uuid})    ← S3 DeleteMarker 付与
-   UPDATE files SET state='purged', updated_at=now()
+   for each fv in file_versions WHERE file_id_bin = $1:
+     os.Remove(/var/data/owner-X/versions/{file_uuid}/{fv.id_bin})  -- S3 DeleteMarker 付与
+   UPDATE files SET state='purged', updated_at=NOW(6) WHERE id_bin=$1
    INSERT audit_logs (action='file.purge', irreversible=true)
 ```
 
@@ -293,8 +299,9 @@ SELECT id, owner_id, storage_key
    ▼
 for each row:
    try:
-     os.Remove(storage_key)
-     UPDATE files SET state='purged' WHERE id=$1
+     for each fv in file_versions WHERE file_id_bin = row.id_bin:
+       os.Remove(/var/data/owner-X/versions/{row.id_bin}/{fv.id_bin})
+     UPDATE files SET state='purged' WHERE id_bin=row.id_bin
      INSERT audit_logs (action='file.purge_by_retention', irreversible=true)
    except err:
      log.error
@@ -325,7 +332,7 @@ expires_at の妥当性検証
 password が指定されている場合 Argon2id でハッシュ
    │
    ▼
-INSERT share_links (id=gen_random_uuid(), file_id, ...)
+INSERT INTO share_links (id_bin=UUID_TO_BIN(UUID()), file_id_bin, token_hash, expires_at, ...)
 INSERT audit_logs (action='share.create', target_id=share_link.id)
    │
    ▼
@@ -357,11 +364,21 @@ INSERT audit_logs (action='share.revoke')
 [クエリ正規化: NFC, trim, 最低 1 文字]
    │
    ▼
-SELECT id, path, name, updated_at, size_bytes
+-- MySQL 8 FULLTEXT (parser=ngram) を使用 (HIGH 修正)
+SELECT id_bin, path, name, updated_at, size_bytes
   FROM files
- WHERE owner_id = $1
+ WHERE owner_id_bin = ?
    AND state = 'active'
-   AND (name % $2 OR EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON ...))
+   AND (
+     MATCH(name) AGAINST (? IN BOOLEAN MODE)                        -- ファイル名 ngram 検索
+     OR EXISTS (
+        SELECT 1 FROM file_tags ft
+          JOIN tags t ON t.id_bin = ft.tag_id_bin
+         WHERE ft.file_id_bin = files.id_bin
+           AND t.owner_id_bin = files.owner_id_bin
+           AND t.name LIKE CONCAT(?, '%')                            -- タグ前方一致
+     )
+   )
  ORDER BY updated_at DESC
  LIMIT 50;
    │
@@ -392,19 +409,29 @@ return HTML タイムライン
 
 ```
 [POST /undo]
-   body: { "audit_log_id": "..." }
+   body: { "audit_log_id_bin": "..." }
    │
    ▼
 [共通ガード]
    │
    ▼
-SELECT * FROM audit_logs WHERE id=$1 AND actor_id=session.user_id
+SELECT * FROM audit_logs WHERE id_bin=? AND actor_id_bin=session.user_id
    ├── 5 分以上前 → 410 Gone (アンドゥ期限切れ)
    ├── action が 'file.rename' or 'file.move' でない → 400
    └── OK →
-         逆操作の PATCH を実行 (details_json.from を新パスとして)
-         INSERT audit_logs (action='file.undo', details_json={ undid: $1 })
+         -- MEDIUM 修正: 通常のリネームハンドラに委譲
+         逆方向の PATCH /files/{id} を内部呼び出し
+           - body: { "path": <details_json.from> }
+           - header: If-Match: <現在の version_id>   (OCC 必須)
+           - 通常ハンドラの分岐を経由するため:
+              * 戻し先に同名 active があれば 409 Conflict (ユーザに選択モーダル)
+              * version_id 不一致 (アンドゥ期間中に他端末が触った) → 409
+              * trashed/purged → 410
+         成功時:
+           INSERT audit_logs (action='file.undo', details_json={ undid: <orig_log_id> })
 ```
+
+「アンドゥだから無条件で戻る」とはしない。アンドゥも通常の rename/move 経路を通り、OCC・同名衝突・状態遷移チェックを必ず通過する（INV-5）。
 
 ## 12. 例外一覧と HTTP ステータス対応表
 

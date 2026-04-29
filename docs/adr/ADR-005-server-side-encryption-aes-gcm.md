@@ -1,8 +1,8 @@
-# ADR-005: 保存時暗号化はアプリ層 AES-256-GCM + S3 SSE の多重防御
+# ADR-005: 保存時暗号化はアプリ層 Streaming AEAD + S3 SSE の多重防御（自前 nonce は不採用）
 
 ## ステータス
 
-採択 (2026-04-29)
+採択 (2026-04-29)。自己レビュー指摘により、実装プリミティブを「自前 nonce + GCM」から「検証済み Streaming AEAD ライブラリ」に変更。
 
 ## コンテキスト
 
@@ -68,10 +68,13 @@ Data Encryption Key (per file version)
 ```
 
 実装方針：
-- 1 MiB チャンクごとに認証付き暗号化（連番 nonce + GCM タグ）
-- 末尾に「総チャンク数 + 終端タグ」を記録（途中切られても改ざん検出）
-- DEK は file_versions テーブルに `dek_enc` として保管
-- マスタ鍵ローテーション時は KEK のみ再ラップ（DEK・本体は触らない）
+- ストリーム AEAD は **Tink Streaming AEAD (AES-256-GCM-HKDF-1MB)** を第一候補とする。age / libsodium SecretStream も代替として ADR の対象範囲に含める
+- 「自前で 12 bytes ベース nonce + 4 bytes チャンク連番を組み立てる」設計は不採用（GCM の安全性を破壊しうる）
+- DEK は `file_versions.dek_enc` として保管（KEK で AES-Key-Wrap）
+- KEK は `users.kek_enc` として保管（Master Key で AES-Key-Wrap）
+- 暗号化スキームは `file_versions.encryption_scheme` に記録（将来の移行のため）
+- AAD には `file_id_bin || version_number || owner_id_bin` を含めて取り違え防止
+- Master Key ローテーション時は KEK のみ再ラップ（DEK・本体は触らない）
 
 ## 帰結
 

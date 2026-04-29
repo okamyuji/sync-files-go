@@ -9,7 +9,7 @@
 | 0 | [00-overview.md](./00-overview.md) | プロダクト概要・ゴール・非ゴール・用語定義 | 全員 |
 | 1 | [01-requirements.md](./01-requirements.md) | 機能要件・非機能要件・要件のロジックツリー | 全員 |
 | 2 | [02-architecture.md](./02-architecture.md) | 全体アーキテクチャ・コンポーネント・データフロー | 設計者 / インフラ |
-| 3 | [03-domain-model.md](./03-domain-model.md) | ドメインモデル・ER 図・PostgreSQL スキーマ・S3 Files 配置 | 実装者 / DBA |
+| 3 | [03-domain-model.md](./03-domain-model.md) | ドメインモデル・ER 図・MySQL スキーマ・S3 Files 配置 | 実装者 / DBA |
 | 4 | [04-sync-semantics.md](./04-sync-semantics.md) | **本システムの最重要章。** 同期セマンティクス・OCC・競合解決 | 全員 |
 | 5 | [05-file-operations-logic-tree.md](./05-file-operations-logic-tree.md) | ファイル操作（アップロード／ダウンロード／更新／削除／リネーム／共有）の MECE ロジックツリー | 実装者 |
 | 6 | [06-data-loss-prevention.md](./06-data-loss-prevention.md) | ファイル損失防止戦略の多層防御・損失シナリオ別対策 | 全員 |
@@ -40,7 +40,7 @@
 
 | ID | 不変条件 |
 |---|---|
-| INV-1 | 物理削除は「ユーザの明示的操作」と「30 日経過」の AND で初めて発火する（即時の物理削除はゼロ） |
+| INV-1 | active からの即時物理削除は禁止。trashed を経た上で「パスワード再入力済みの明示 purge」または「30 日経過バッチ」でのみ物理削除可 |
 | INV-2 | すべての書き込みは累積的（上書きでも S3 バージョニングで旧版が必ず残る） |
 | INV-3 | サーバは自動マージを行わない（バイトレベルでも文字列レベルでも） |
 | INV-4 | 未完了アップロードは正規パスに反映されない（一時領域のみ） |

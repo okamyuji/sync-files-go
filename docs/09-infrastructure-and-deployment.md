@@ -192,8 +192,21 @@ resource "aws_ecs_task_definition" "app" {
       readonlyRootFilesystem = true
       user      = "65532:65532"
       linuxParameters = { capabilities = { drop = ["ALL"], add = ["NET_BIND_SERVICE"] } }
+      mountPoints = [
+        # nginx の cache / pid / tmp が ReadOnlyRootFilesystem 下でも書ける tmpfs
+        { sourceVolume = "nginx-tmp", containerPath = "/var/cache/nginx", readOnly = false },
+        { sourceVolume = "nginx-run", containerPath = "/run",             readOnly = false },
+      ]
       dependsOn = [{ containerName = "app", condition = "HEALTHY" }]
       portMappings = []
+      # HIGH 修正: nginx 自身に health check を持たせ、cloudflared は HEALTHY 依存にする
+      healthCheck = {
+        command     = ["CMD-SHELL", "wget -qO- --no-check-certificate https://127.0.0.1:8443/healthz || exit 1"]
+        interval    = 15
+        timeout     = 5
+        retries     = 3
+        startPeriod = 20
+      }
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -211,7 +224,8 @@ resource "aws_ecs_task_definition" "app" {
       secrets = [
         { name = "TUNNEL_TOKEN", valueFrom = aws_secretsmanager_secret.cloudflared_token.arn }
       ]
-      dependsOn = [{ containerName = "nginx", condition = "START" }]
+      # HIGH 修正: cloudflared は nginx が HEALTHY になってから起動
+      dependsOn = [{ containerName = "nginx", condition = "HEALTHY" }]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -231,6 +245,10 @@ resource "aws_ecs_task_definition" "app" {
       port             = 2049
     }
   }
+
+  # HIGH 修正: nginx の書き込み先 (read_only_root_filesystem 下でも動かすため)
+  volume { name = "nginx-tmp" }
+  volume { name = "nginx-run" }
 }
 ```
 
@@ -250,9 +268,11 @@ resource "aws_ecs_service" "app" {
   enable_execute_command = false
 
   network_configuration {
-    subnets          = var.private_subnet_ids
+    # HIGH 修正: ECS タスクは Public Subnet に配置 + Public IP 付与 + Inbound 全 deny
+    # （Cloudflare Tunnel のために IGW へ outbound する必要があるため）
+    subnets          = var.public_subnet_ids
     security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = true   # cloudflared が outbound 接続するため、IGW へ向ける ENI に Public IP
+    assign_public_ip = true
   }
 
   deployment_circuit_breaker {
@@ -264,7 +284,8 @@ resource "aws_ecs_service" "app" {
 }
 
 resource "aws_appautoscaling_target" "ecs" {
-  max_capacity       = 3
+  # HIGH 修正: v1 は単一タスクに固定。S3 Files の複数同時マウント検証完了後に上限を上げる
+  max_capacity       = 1
   min_capacity       = 1
   resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.app.name}"
   scalable_dimension = "ecs:service:DesiredCount"

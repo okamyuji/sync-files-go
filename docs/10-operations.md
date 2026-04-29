@@ -287,7 +287,7 @@ CLI は ECS Exec から実行し、操作はすべて `audit_logs` に `actor_ki
 ```
 1. Network: Cloudflare Tunnel ヘルス OK? ECS タスクヘルスチェック OK?
 2. Storage: S3 Files マウント OK? df -h /var/data
-3. DB: 接続プール枯渇? select count(*) from pg_stat_activity;
+3. DB: 接続プール枯渇? `SHOW STATUS LIKE 'Threads_connected';` / `SHOW PROCESSLIST;`
 4. アプリ: アップロード失敗ログを確認
 5. 暫定: タスクを再起動 (ECS service update --force-new-deployment)
 ```

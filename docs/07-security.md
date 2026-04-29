@@ -101,17 +101,23 @@ func (s Session) Decode(raw string) (uuid.UUID, error) {
 - ロック中は「メールで通知」(将来)
 ```
 
-### 3.5 パスワードリセット
+### 3.5 パスワードリセット（MEDIUM 修正：v1 はリカバリコードのみ）
 
-v1 では「自分しか使わない」前提なので、Email リンクで安全にリセット：
+Email 送信基盤（SES / SMTP / 配信ドメイン / DKIM / DMARC・配送失敗の運用）を v1 では立てない判断とし、パスワードリセットは **発行済みリカバリコード（10 個）でのみ** 実行する。
 
 ```
-[POST /password-reset]
-   ├── 5 分以内に 5 回まで
-   ├── トークン: 32 bytes ランダム、HMAC で署名
-   ├── 有効期限: 30 分
-   └── トークン消費後はそのトークン値の再利用不可 (DB で消費フラグ)
+[ログイン画面]
+   └─ "リカバリコードを使う"
+        └─ /recovery
+             ├── 5 分以内に 5 回まで
+             ├── 入力されたコードを Argon2id で検証
+             ├── 一致したら新パスワード設定画面へ
+             └── 使用済みコードは即座に無効化（残り 9 個）
 ```
+
+リカバリコードを 10 個すべて使い切った／紛失した場合、復旧手段は AWS コンソールから RDS にアクセスして手動でパスワードハッシュをリセットする運用 Runbook（[`10-operations.md`](./10-operations.md)）。
+
+Email リセットは v2 候補（SES の本番ドメイン認証完了後）。
 
 ## 4. 暗号化（保存時 / 転送時）
 
@@ -130,43 +136,66 @@ v1 では「自分しか使わない」前提なので、Email リンクで安�
 ### 4.1 鍵階層
 
 ```
-Master Key (MK)                   ← Secrets Manager に保管。アプリ起動時に取得し、メモリに保持
+Master Key (MK, 32 bytes)         ← Secrets Manager に保管 (master_key_version 付き)、起動時にメモリへ
    │  AES-Key-Wrap (RFC 3394)
    ▼
-Key Encryption Key (KEK)          ← ユーザ単位で 1 個。RDS の users.kek_enc に暗号化保管
-   │  AES-256-GCM
+Key Encryption Key (KEK, 32 bytes) ← users.kek_enc に保管。kek_id_bin / master_key_version 同行
+   │  AES-Key-Wrap (RFC 3394)
    ▼
-Data Encryption Key (DEK)         ← ファイルバージョン単位で 1 個。file_versions.dek_enc に暗号化保管
-   │  AES-256-GCM
+Data Encryption Key (DEK, 32 bytes) ← file_versions.dek_enc に保管。kek_id_bin 同行
+   │  AEAD ストリーム暗号化 (CR-4: 標準ライブラリ直書きを廃止し、検証済みプリミティブを使用)
    ▼
 ファイル本体 (S3 Files 上)
 ```
 
 階層の意義：
-- マスタ鍵を回転（rotate）するときは KEK を再ラップするだけで済む（DEK・ファイル本体は触らない）
-- 一部のユーザの侵害があっても、他ユーザの鍵に影響しない
+- Master Key を回転するときは KEK を再ラップするだけで済む（DEK・ファイル本体は触らない）
+- 一部のユーザが侵害されても、他ユーザの KEK・DEK に影響しない
 - DEK 漏洩しても影響範囲は 1 バージョンのみ
 
-### 4.2 アプリ層暗号化（書き込み）
+DB スキーマでの表現は [`03-domain-model.md`](./03-domain-model.md) §4 の `users.kek_enc` / `file_versions.dek_enc` / `file_versions.encryption_scheme` / `file_versions.encryption_header` を参照。
+
+### 4.2 アプリ層暗号化（CR-4 修正：自前 nonce 戦略を廃止）
+
+> **重要**: 設計初版では「12 bytes ベース nonce + 4 bytes チャンク連番」を自前で組み立てていたが、これは GCM の標準 nonce 長と矛盾し、実装ミスで nonce 再利用が起きた瞬間に AEAD が破綻する。本設計では **検証済みのストリーム AEAD プリミティブ**を採用し、自前の nonce 構成は行わない。
+
+採用候補（実装時に確定。`encryption_scheme` 列に記録）：
+
+| スキーム | ライブラリ | 標準ライブラリ縛りからの逸脱 |
+|---|---|---|
+| **Tink Streaming AEAD (AES-256-GCM-HKDF-1MB)** ← 第一候補 | `github.com/tink-crypto/tink-go/v2` | ◯（追加依存だが、Google 製の堅牢な実装） |
+| age (X25519 / ChaCha20-Poly1305 ベース) | `filippo.io/age` | ◯（小さく依存も少ない） |
+| libsodium SecretStream | `github.com/jamesruan/sodium` | ◯（C ライブラリ依存、Distroless では工夫が要る） |
+
+「Go 標準ライブラリ中心」という非機能要件はこの一点で緩める：データ暗号化の正しさは個人実装より検証済みライブラリに任せる方が安全（CR-4 の要点）。詳細は [ADR-005](./adr/ADR-005-server-side-encryption-aes-gcm.md)。
+
+呼び出しイメージ（Tink を採った場合）：
 
 ```go
-func encryptStream(plain io.Reader, dek [32]byte) (io.Reader, error) {
-    block, _ := aes.NewCipher(dek[:])
-    aead, _ := cipher.NewGCM(block)
-    nonce := make([]byte, aead.NonceSize())
-    rand.Read(nonce)
+import (
+    "github.com/tink-crypto/tink-go/v2/aead/streamingaead"
+    "github.com/tink-crypto/tink-go/v2/keyset"
+)
 
-    // ストリーム化のため、本実装では chunked AEAD（例: 1MB ごとに認証タグ）を採用
-    // 単純な aead.Seal はメモリ全量必要。Go 標準ライブラリだけでは扱いにくいので、
-    // 1MB チャンク + 各チャンクに連番 nonce + 各チャンク末尾に GCM タグ、を直書きする。
-    return &chunkedEncryptingReader{src: plain, key: dek, nonce: nonce}, nil
+func encryptStream(dst io.WriteCloser, src io.Reader, dek []byte, aad []byte) error {
+    handle, err := keyset.NewHandleFromRawKey(dek, "AES256_GCM_HKDF_1MB")
+    if err != nil { return err }
+    saead, err := streamingaead.New(handle)
+    if err != nil { return err }
+
+    encWriter, err := saead.NewEncryptingWriter(dst, aad)
+    if err != nil { return err }
+    defer encWriter.Close()
+
+    _, err = io.Copy(encWriter, src)
+    return err
 }
 ```
 
-実装詳細：
-- チャンクサイズ: 1 MiB
-- 各チャンクの nonce: ベース nonce 12 bytes + 4 bytes チャンク連番（big-endian）
-- ファイル末尾に「総チャンク数」と「終端タグ」を記録（途中で切られても改ざん検出可）
+- AAD には `file_id_bin || version_number || owner_id_bin` を入れ、別ファイルとの取り違えを防止する
+- Tink の Streaming AEAD は内部で：1MB セグメント、各セグメントに固有 nonce（HKDF 派生）、各セグメントに認証タグ、最終セグメントに終端マーカー
+- 途中で切断されたファイルは復号時に検出可能（先頭から順に GMAC を検証するため）
+- nonce 再利用やランダム値の管理は Tink が責任を持つ
 
 ### 4.3 S3 Files 側の SSE
 

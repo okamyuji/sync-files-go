@@ -79,9 +79,23 @@ Data Encryption Key (per file version)
 ## 帰結
 
 - 07-security.md §4 に詳細
-- 暗号プリミティブのみ標準ライブラリ縛りを **明示的に緩める**（Tink Streaming AEAD などの検証済みライブラリを採用）。それ以外の暗号サブシステム（鍵ラップは RFC 3394 を crypto/aes ベースで実装、TOTP は crypto/hmac で自作 など）は標準ライブラリで通す
 - 鍵ローテーション手順は 10-operations.md §6
 - 復号失敗（GCM 認証タグ不一致）はアラート対象とし、CloudWatch にメトリクス化
+
+## v1 実装の選択（2026-04 update）
+
+Tink Streaming AEAD を第一候補としたが、Distroless arm64 でのビルド可否を実機検証する前に v1 実装を進める都合上、**v1 では以下の chunked AEAD を `internal/crypto/aead.go` で標準ライブラリ実装する**：
+
+- 暗号: `crypto/aes` + `crypto/cipher` (AES-256-GCM)
+- フレーム: `[length:4][ciphertext+tag]` の繰り返し
+- nonce 構造: **8 bytes random base + 4 bytes big-endian counter**（合計 12 bytes、GCM 標準長と整合）
+- 最終チャンクには AAD に `"last:"` プレフィックスを付与（途中切断検出）
+- chunk size: 1 MiB
+- 暗号化スキーム名: `aead-aes256-gcm-chunked-1mb-v1`（`encryption_scheme` 列に保存）
+
+この実装は ADR-005 が禁じる「自前で 12 bytes 全体を組み立てて nonce 再利用を起こす設計」**ではない**。8 bytes ランダム base が ファイルバージョン単位で固有、4 bytes counter がチャンク単位で固有なので、同じファイル内で nonce が再利用されないことが構造的に保証される。異なるファイル間も base の衝突確率は 2^-64。
+
+将来 Tink Streaming AEAD への移行を行う場合、`encryption_scheme` 列の値で旧版を識別して並行復号できる。スキームの追加は SQL マイグレーション不要。
 
 ## リンク
 

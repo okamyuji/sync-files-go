@@ -26,11 +26,13 @@
 主要な技術選択の意思決定記録は [`adr/`](./adr/) を参照：
 
 - [ADR-001](./adr/ADR-001-s3-files-vs-direct-s3.md): S3 Files (NFS) を選択し、S3 SDK 直接利用は最小化
-- [ADR-002](./adr/ADR-002-rds-postgres-not-self-hosted.md): メタデータ DB は RDS for PostgreSQL（自前構築・SQLite を不採用）
+- [ADR-002](./adr/ADR-002-rds-mysql-not-self-hosted.md): メタデータ DB は RDS for MySQL（自前構築・SQLite を不採用、PostgreSQL 案から変更）
 - [ADR-003](./adr/ADR-003-occ-not-last-write-wins.md): 同期は OCC + コンフリクトコピー（後勝ち / 先勝ち を不採用）
 - [ADR-004](./adr/ADR-004-soft-delete-30-days.md): 削除はゴミ箱 30 日 + S3 バージョニングの二段ガード
 - [ADR-005](./adr/ADR-005-server-side-encryption-aes-gcm.md): 保存時暗号化は AES-256-GCM（アプリ層）+ S3 SSE の多重防御
 - [ADR-006](./adr/ADR-006-htmx-not-spa.md): フロントは HTMX（SPA を不採用）
+- [ADR-007](./adr/ADR-007-cloudflare-tunnel-not-alb.md): 外部公開は Cloudflare Tunnel + サイドカー nginx（ALB を不採用）
+- [ADR-008](./adr/ADR-008-mysql-read-replica-write-ahead.md): MySQL の読み書き分離（Primary Write / Read Replica）と DBRouter 設計
 
 ## 設計の不変条件（最重要）
 

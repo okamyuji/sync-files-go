@@ -26,7 +26,7 @@
 設計の出発点として、**「ファイル本体（バイト列）」と「ファイルの存在（メタデータ）」を分離する** ことを徹底する。理由：
 
 - バイト列は S3 Files に置く（耐久性・容量）
-- メタデータは PostgreSQL に置く（検索・トランザクション・整合性）
+- メタデータは MySQL Primary に置く（書き込み・read-after-write）と Read Replica（一覧・検索・履歴）
 - 両者は **論理的に同期するが、原子的トランザクションは張れない**（分散の壁）。ゆえに後述の冪等処理と再同期ジョブが必要
 
 ## 2. エンティティ詳細
@@ -35,16 +35,16 @@
 
 ```
 User {
-  id            UUID (主キー)
-  email         string (unique, lowercased, NFC)
-  password_hash string (Argon2id)
-  totp_secret   bytes (AES-256-GCM で暗号化済み)
-  totp_enabled  bool
-  recovery_codes_hash text[]   (Argon2id)
-  created_at    timestamptz
-  last_login_at timestamptz
-  locked_until  timestamptz nullable  (ログイン失敗による一時ロック)
-  failed_login_count int default 0
+  id_bin        BINARY(16) (主キー、UUID v4 を BIN(16) で保管)
+  email         VARCHAR(320) UNIQUE  (NFC 正規化済み)
+  password_hash VARCHAR(255)         (Argon2id)
+  totp_secret_enc VARBINARY(128)     (AES-GCM で暗号化済み)
+  totp_enabled  TINYINT(1)
+  recovery_codes_hash JSON            (Argon2id 文字列の配列)
+  created_at    DATETIME(6)
+  last_login_at DATETIME(6) nullable
+  locked_until  DATETIME(6) nullable
+  failed_login_count INT default 0
 }
 ```
 
@@ -54,80 +54,84 @@ User {
 
 ```
 File {
-  id            UUID (主キー)
-  owner_id      UUID (User.id)
-  parent_folder_id UUID nullable (Folder.id)
-  name          string  (ファイル名のみ。NFC 正規化済み)
-  path          string  (フルパス。冗長だが検索高速化のため)
-  current_version_id UUID  (FileVersion.id への参照)
-  size_bytes    bigint
-  content_type  string
-  storage_key   string  (S3 Files 上のキー = 'owner-{uuid}/current/{file_uuid}')
-  created_at    timestamptz
-  updated_at    timestamptz
-  deleted_at    timestamptz nullable    -- ソフト削除
-  state         enum('draft','active','trashed','purged','gone')
-  sha256        bytes  (32 bytes)  -- 暗号化前の本体に対するハッシュ
-  encryption_key_id UUID  (内部の鍵管理。鍵階層は 07-security)
+  id_bin             BINARY(16) (主キー)
+  owner_id_bin       BINARY(16)
+  parent_folder_id_bin BINARY(16) nullable
+  name               VARCHAR(255)  (NFC 正規化済み)
+  path               VARCHAR(2048) (フルパス)
+  current_version_id_bin BINARY(16) nullable
+  size_bytes         BIGINT
+  content_type       VARCHAR(255)
+  storage_key        VARCHAR(512)  (S3 Files 上のキー)
+  created_at         DATETIME(6)
+  updated_at         DATETIME(6)
+  deleted_at         DATETIME(6) nullable
+  state              ENUM('draft','active','trashed','purged','gone')   -- 採択: ENUM か CHECK 制約
+  sha256             VARBINARY(32)
+  encryption_key_id_bin BINARY(16)
 }
 ```
 
 不変条件：
 - `state = 'active'` ⇒ `deleted_at IS NULL`
-- `state = 'trashed'` ⇒ `deleted_at IS NOT NULL` AND `deleted_at > now() - interval '30 days'`
-- `state = 'purged'` ⇒ `deleted_at < now() - interval '30 days'`
-- `state = 'draft'` のレコードは `current_version_id IS NULL` を許す
+- `state = 'trashed'` ⇒ `deleted_at IS NOT NULL` AND `deleted_at > NOW() - INTERVAL 30 DAY`
+- `state = 'purged'` ⇒ `deleted_at < NOW() - INTERVAL 30 DAY`
+- `state = 'draft'` のレコードは `current_version_id_bin IS NULL` を許す
+
+MySQL の制約事項：
+- 部分インデックス（PostgreSQL の `WHERE` 付き）が無いため、「同名 active ファイルの一意性」は **アプリ層で `SELECT FOR UPDATE` + INSERT で担保** する（`(owner_id_bin, path)` の UNIQUE は不採用）
+- `DEFERRABLE` 外部キーが無いため、`current_version_id_bin` は外部キー制約を張らず、アプリ層で整合性を保つ（あるいは「先に file 行を INSERT し、後で UPDATE」する手順）
 
 ### 2.3 FileVersion
 
 ```
 FileVersion {
-  id              UUID (主キー)
-  file_id         UUID (File.id)
-  version_number  int  (1, 2, 3, ...)
-  size_bytes      bigint
-  sha256          bytes
-  storage_key     string  (S3 Files 上のキー = 'owner-{uuid}/versions/{file_uuid}/v{N}')
-  s3_version_id   string  (S3 バケットバージョニングの version-id)
-  encryption_key_id UUID
-  created_at      timestamptz
-  created_by_session_id UUID nullable  (どのセッション/端末から作成されたか・OCC で利用)
-  deleted_by_user bool default false   (ユーザが個別削除した版か)
+  id_bin             BINARY(16) (主キー)
+  file_id_bin        BINARY(16) FOREIGN KEY → files.id_bin
+  version_number     INT
+  size_bytes         BIGINT
+  sha256             VARBINARY(32)
+  storage_key        VARCHAR(512)
+  s3_version_id      VARCHAR(128) nullable
+  encryption_key_id_bin BINARY(16)
+  created_at         DATETIME(6)
+  created_by_session_id_bin BINARY(16) nullable
+  deleted_by_user    TINYINT(1) default 0
 }
+UNIQUE (file_id_bin, version_number)
 ```
-
-`(file_id, version_number)` に UNIQUE 制約。
 
 ### 2.4 Folder
 
 ```
 Folder {
-  id            UUID (主キー)
-  owner_id      UUID
-  parent_folder_id UUID nullable
-  name          string (NFC 正規化済み)
-  path          string (フルパス、末尾 / なし)
-  created_at    timestamptz
-  deleted_at    timestamptz nullable
+  id_bin               BINARY(16)
+  owner_id_bin         BINARY(16)
+  parent_folder_id_bin BINARY(16) nullable
+  name                 VARCHAR(255)
+  path                 VARCHAR(2048)
+  created_at           DATETIME(6)
+  deleted_at           DATETIME(6) nullable
 }
 ```
 
-ルートは `parent_folder_id IS NULL` AND `path = ''`。
+ルートは `parent_folder_id_bin IS NULL` AND `path = ''`。
 
 ### 2.5 Tag / FileTag
 
 ```
 Tag {
-  id        UUID
-  owner_id  UUID
-  name      string (NFC 正規化済み、unique per owner)
-  created_at timestamptz
+  id_bin       BINARY(16)
+  owner_id_bin BINARY(16)
+  name         VARCHAR(64)
+  created_at   DATETIME(6)
+  UNIQUE (owner_id_bin, name)
 }
 
 FileTag {
-  file_id UUID
-  tag_id  UUID
-  PRIMARY KEY (file_id, tag_id)
+  file_id_bin BINARY(16)
+  tag_id_bin  BINARY(16)
+  PRIMARY KEY (file_id_bin, tag_id_bin)
 }
 ```
 
@@ -135,15 +139,15 @@ FileTag {
 
 ```
 ShareLink {
-  id            UUID (主キー、URL に露出する)
-  file_id       UUID (File.id)
-  created_by    UUID (User.id)
-  password_hash string nullable  (Argon2id)
-  expires_at    timestamptz nullable
-  created_at    timestamptz
-  revoked_at    timestamptz nullable
-  view_count    bigint default 0
-  download_count bigint default 0
+  id_bin           BINARY(16)
+  file_id_bin      BINARY(16) FOREIGN KEY → files.id_bin
+  created_by_bin   BINARY(16) FOREIGN KEY → users.id_bin
+  password_hash    VARCHAR(255) nullable  (Argon2id)
+  expires_at       DATETIME(6) nullable
+  created_at       DATETIME(6)
+  revoked_at       DATETIME(6) nullable
+  view_count       BIGINT default 0
+  download_count   BIGINT default 0
 }
 ```
 
@@ -151,13 +155,13 @@ ShareLink {
 
 ```
 ShareLinkAccess {
-  id            UUID
-  share_link_id UUID
-  ip_addr       inet  -- 監査・濫用検出
-  user_agent    string
-  accessed_at   timestamptz
-  action        enum('view','download','password_failure')
-  http_status   int
+  id_bin            BINARY(16)
+  share_link_id_bin BINARY(16) FOREIGN KEY → share_links.id_bin
+  ip_addr           VARBINARY(16)   (IPv4/IPv6 を 16 bytes で統一保管)
+  user_agent        VARCHAR(512)
+  accessed_at       DATETIME(6)
+  action            ENUM('view','download','password_failure')
+  http_status       INT
 }
 ```
 
@@ -165,17 +169,17 @@ ShareLinkAccess {
 
 ```
 AuditLog {
-  id            UUID
-  occurred_at   timestamptz
-  actor_id      UUID nullable    -- nullable は公開リンク経由のため
-  actor_kind    enum('user','public_viewer','system')
-  action        text  -- 'file.upload', 'file.update', 'file.delete', 'file.restore', 'file.purge', 'file.rename', 'file.move', 'share.create', 'share.revoke', 'auth.login', 'auth.logout', 'auth.password_change', etc.
-  target_kind   text  -- 'file', 'folder', 'share_link', 'user'
-  target_id     UUID nullable
-  details_json  jsonb -- 操作固有の追加情報（before / after）
-  ip_addr       inet nullable
-  user_agent    string nullable
-  irreversible  bool default false
+  id_bin       BINARY(16)
+  occurred_at  DATETIME(6)
+  actor_id_bin BINARY(16) nullable
+  actor_kind   ENUM('user','public_viewer','system')
+  action       VARCHAR(64)        -- 'file.upload', 'file.update', etc.
+  target_kind  VARCHAR(32)
+  target_id_bin BINARY(16) nullable
+  details_json JSON
+  ip_addr      VARBINARY(16) nullable
+  user_agent   VARCHAR(512) nullable
+  irreversible TINYINT(1) default 0
 }
 ```
 
@@ -185,18 +189,18 @@ INSERT のみ。UPDATE / DELETE はアプリケーションロールに付与し
 
 ```
 UploadSession {
-  id            UUID  (URL に露出)
-  owner_id      UUID
-  parent_folder_id UUID nullable
-  filename      string
-  size_total    bigint
-  size_received bigint default 0
-  storage_key   string  -- /var/data/.../tmp/{upload_uuid}.part
-  if_match      string nullable  -- 上書き対象の version_id
-  if_none_match string nullable  -- 新規時は '*'
-  created_at    timestamptz
-  expires_at    timestamptz  -- 7 日
-  completed_at  timestamptz nullable
+  id_bin               BINARY(16)
+  owner_id_bin         BINARY(16)
+  parent_folder_id_bin BINARY(16) nullable
+  filename             VARCHAR(255)
+  size_total           BIGINT
+  size_received        BIGINT default 0
+  storage_key          VARCHAR(512)
+  if_match             VARCHAR(64) nullable   -- 上書き対象の version_id (UUID 文字列)
+  if_none_match        VARCHAR(8)  nullable   -- '*'
+  created_at           DATETIME(6)
+  expires_at           DATETIME(6)            -- 7 日
+  completed_at         DATETIME(6) nullable
 }
 ```
 
@@ -204,13 +208,13 @@ UploadSession {
 
 ```
 Session {
-  id            UUID  (Cookie に格納する値の元、HMAC 署名済み）
-  user_id       UUID
-  created_at    timestamptz
-  last_seen_at  timestamptz
-  expires_at    timestamptz
-  ip_addr       inet
-  user_agent    string
+  id_bin       BINARY(16)
+  user_id_bin  BINARY(16)
+  created_at   DATETIME(6)
+  last_seen_at DATETIME(6)
+  expires_at   DATETIME(6)
+  ip_addr      VARBINARY(16)
+  user_agent   VARCHAR(512)
 }
 ```
 
@@ -249,293 +253,355 @@ Session {
        └──────────────────┘
 ```
 
-## 4. PostgreSQL スキーマ（正準）
+## 4. MySQL スキーマ（正準）
 
 最終的なマイグレーション SQL は `migrations/` に置くが、設計時点での参照スキーマを以下に示す。
 
 ```sql
--- 拡張
-CREATE EXTENSION IF NOT EXISTS pgcrypto;     -- gen_random_uuid()
-CREATE EXTENSION IF NOT EXISTS pg_trgm;      -- 検索
+SET sql_mode = 'STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION';
 
 -- ユーザ
 CREATE TABLE users (
-  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email               TEXT NOT NULL UNIQUE,
-  password_hash       TEXT NOT NULL,
-  totp_secret_enc     BYTEA,                  -- AES-GCM で暗号化済み
-  totp_enabled        BOOLEAN NOT NULL DEFAULT false,
-  recovery_codes_hash TEXT[]  NOT NULL DEFAULT '{}',
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  last_login_at       TIMESTAMPTZ,
-  locked_until        TIMESTAMPTZ,
-  failed_login_count  INT NOT NULL DEFAULT 0
-);
+  id_bin              BINARY(16) PRIMARY KEY,
+  email               VARCHAR(320) NOT NULL,
+  password_hash       VARCHAR(255) NOT NULL,
+  totp_secret_enc     VARBINARY(256),
+  totp_enabled        TINYINT(1) NOT NULL DEFAULT 0,
+  recovery_codes_hash JSON NOT NULL,
+  created_at          DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  last_login_at       DATETIME(6),
+  locked_until        DATETIME(6),
+  failed_login_count  INT NOT NULL DEFAULT 0,
+  UNIQUE KEY uniq_users_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- フォルダ
 CREATE TABLE folders (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_id         UUID NOT NULL REFERENCES users(id),
-  parent_folder_id UUID REFERENCES folders(id) ON DELETE RESTRICT,
-  name             TEXT NOT NULL,
-  path             TEXT NOT NULL,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  deleted_at       TIMESTAMPTZ,
-  UNIQUE (owner_id, path)
-);
-CREATE INDEX idx_folders_owner_path ON folders (owner_id, path);
-CREATE INDEX idx_folders_parent ON folders (parent_folder_id);
+  id_bin                BINARY(16) PRIMARY KEY,
+  owner_id_bin          BINARY(16) NOT NULL,
+  parent_folder_id_bin  BINARY(16),
+  name                  VARCHAR(255) NOT NULL,
+  path                  VARCHAR(2048) NOT NULL,
+  created_at            DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  deleted_at            DATETIME(6),
+  KEY idx_folders_owner_path (owner_id_bin, path(255)),
+  KEY idx_folders_parent     (parent_folder_id_bin),
+  CONSTRAINT fk_folders_owner FOREIGN KEY (owner_id_bin) REFERENCES users(id_bin)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- ファイル
 CREATE TABLE files (
-  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_id           UUID NOT NULL REFERENCES users(id),
-  parent_folder_id   UUID REFERENCES folders(id) ON DELETE RESTRICT,
-  name               TEXT NOT NULL,
-  path               TEXT NOT NULL,
-  current_version_id UUID,                     -- file_versions(id) 後で FK
-  size_bytes         BIGINT NOT NULL,
-  content_type       TEXT,
-  storage_key        TEXT NOT NULL,
-  sha256             BYTEA NOT NULL,           -- 32 bytes
-  encryption_key_id  UUID NOT NULL,
-  state              TEXT NOT NULL CHECK (state IN ('draft','active','trashed','purged','gone')),
-  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  deleted_at         TIMESTAMPTZ,
-  UNIQUE (owner_id, path)
-    DEFERRABLE INITIALLY IMMEDIATE
-);
-CREATE INDEX idx_files_owner_path ON files (owner_id, path);
-CREATE INDEX idx_files_owner_state ON files (owner_id, state);
-CREATE INDEX idx_files_deleted_at ON files (deleted_at) WHERE state = 'trashed';
-CREATE INDEX idx_files_name_trgm ON files USING gin (name gin_trgm_ops);
+  id_bin                  BINARY(16) PRIMARY KEY,
+  owner_id_bin            BINARY(16) NOT NULL,
+  parent_folder_id_bin    BINARY(16),
+  name                    VARCHAR(255) NOT NULL,
+  path                    VARCHAR(2048) NOT NULL,
+  current_version_id_bin  BINARY(16),
+  size_bytes              BIGINT NOT NULL,
+  content_type            VARCHAR(255),
+  storage_key             VARCHAR(512) NOT NULL,
+  sha256                  VARBINARY(32) NOT NULL,
+  encryption_key_id_bin   BINARY(16) NOT NULL,
+  state                   ENUM('draft','active','trashed','purged','gone') NOT NULL,
+  created_at              DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at              DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  deleted_at              DATETIME(6),
+  KEY idx_files_owner_path  (owner_id_bin, path(255)),
+  KEY idx_files_owner_state (owner_id_bin, state, updated_at DESC),
+  KEY idx_files_deleted_at  (state, deleted_at),
+  FULLTEXT KEY ft_files_name (name) WITH PARSER ngram,
+  CONSTRAINT fk_files_owner FOREIGN KEY (owner_id_bin) REFERENCES users(id_bin)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- ファイルバージョン
 CREATE TABLE file_versions (
-  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  file_id            UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  version_number     INT  NOT NULL,
-  size_bytes         BIGINT NOT NULL,
-  sha256             BYTEA NOT NULL,
-  storage_key        TEXT NOT NULL,
-  s3_version_id      TEXT,
-  encryption_key_id  UUID NOT NULL,
-  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  created_by_session_id UUID,
-  deleted_by_user    BOOLEAN NOT NULL DEFAULT false,
-  UNIQUE (file_id, version_number)
-);
-CREATE INDEX idx_file_versions_file ON file_versions (file_id, version_number DESC);
-
-ALTER TABLE files
-  ADD CONSTRAINT fk_files_current_version
-  FOREIGN KEY (current_version_id) REFERENCES file_versions(id)
-  DEFERRABLE INITIALLY DEFERRED;
+  id_bin                  BINARY(16) PRIMARY KEY,
+  file_id_bin             BINARY(16) NOT NULL,
+  version_number          INT NOT NULL,
+  size_bytes              BIGINT NOT NULL,
+  sha256                  VARBINARY(32) NOT NULL,
+  storage_key             VARCHAR(512) NOT NULL,
+  s3_version_id           VARCHAR(128),
+  encryption_key_id_bin   BINARY(16) NOT NULL,
+  created_at              DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  created_by_session_id_bin BINARY(16),
+  deleted_by_user         TINYINT(1) NOT NULL DEFAULT 0,
+  UNIQUE KEY uniq_file_versions (file_id_bin, version_number),
+  KEY idx_file_versions_file (file_id_bin, version_number DESC),
+  CONSTRAINT fk_file_versions_file FOREIGN KEY (file_id_bin) REFERENCES files(id_bin) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- タグ
 CREATE TABLE tags (
-  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_id   UUID NOT NULL REFERENCES users(id),
-  name       TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (owner_id, name)
-);
+  id_bin       BINARY(16) PRIMARY KEY,
+  owner_id_bin BINARY(16) NOT NULL,
+  name         VARCHAR(64) NOT NULL,
+  created_at   DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  UNIQUE KEY uniq_tags_owner_name (owner_id_bin, name),
+  CONSTRAINT fk_tags_owner FOREIGN KEY (owner_id_bin) REFERENCES users(id_bin)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE file_tags (
-  file_id UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  tag_id  UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-  PRIMARY KEY (file_id, tag_id)
-);
+  file_id_bin BINARY(16) NOT NULL,
+  tag_id_bin  BINARY(16) NOT NULL,
+  PRIMARY KEY (file_id_bin, tag_id_bin),
+  CONSTRAINT fk_ft_file FOREIGN KEY (file_id_bin) REFERENCES files(id_bin) ON DELETE CASCADE,
+  CONSTRAINT fk_ft_tag  FOREIGN KEY (tag_id_bin)  REFERENCES tags(id_bin)  ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- 共有リンク
 CREATE TABLE share_links (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  file_id          UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  created_by       UUID NOT NULL REFERENCES users(id),
-  password_hash    TEXT,
-  expires_at       TIMESTAMPTZ,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  revoked_at       TIMESTAMPTZ,
+  id_bin           BINARY(16) PRIMARY KEY,
+  file_id_bin      BINARY(16) NOT NULL,
+  created_by_bin   BINARY(16) NOT NULL,
+  password_hash    VARCHAR(255),
+  expires_at       DATETIME(6),
+  created_at       DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  revoked_at       DATETIME(6),
   view_count       BIGINT NOT NULL DEFAULT 0,
-  download_count   BIGINT NOT NULL DEFAULT 0
-);
-CREATE INDEX idx_share_links_file ON share_links (file_id);
-CREATE INDEX idx_share_links_active ON share_links (file_id) WHERE revoked_at IS NULL;
+  download_count   BIGINT NOT NULL DEFAULT 0,
+  KEY idx_share_links_file (file_id_bin),
+  KEY idx_share_links_active (file_id_bin, revoked_at, expires_at),
+  CONSTRAINT fk_share_links_file FOREIGN KEY (file_id_bin) REFERENCES files(id_bin) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE share_link_accesses (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  share_link_id UUID NOT NULL REFERENCES share_links(id) ON DELETE CASCADE,
-  ip_addr       INET NOT NULL,
-  user_agent    TEXT,
-  accessed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  action        TEXT NOT NULL CHECK (action IN ('view','download','password_failure')),
-  http_status   INT
-);
-CREATE INDEX idx_share_link_accesses_link ON share_link_accesses (share_link_id, accessed_at DESC);
+  id_bin            BINARY(16) PRIMARY KEY,
+  share_link_id_bin BINARY(16) NOT NULL,
+  ip_addr           VARBINARY(16) NOT NULL,
+  user_agent        VARCHAR(512),
+  accessed_at       DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  action            ENUM('view','download','password_failure') NOT NULL,
+  http_status       INT,
+  KEY idx_share_link_accesses_link (share_link_id_bin, accessed_at DESC),
+  CONSTRAINT fk_sla_link FOREIGN KEY (share_link_id_bin) REFERENCES share_links(id_bin) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- 監査ログ（INSERT only）
 CREATE TABLE audit_logs (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  occurred_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  actor_id      UUID,
-  actor_kind    TEXT NOT NULL CHECK (actor_kind IN ('user','public_viewer','system')),
-  action        TEXT NOT NULL,
-  target_kind   TEXT NOT NULL,
-  target_id     UUID,
-  details_json  JSONB NOT NULL DEFAULT '{}',
-  ip_addr       INET,
-  user_agent    TEXT,
-  irreversible  BOOLEAN NOT NULL DEFAULT false
-);
-CREATE INDEX idx_audit_logs_actor_time ON audit_logs (actor_id, occurred_at DESC);
-CREATE INDEX idx_audit_logs_target ON audit_logs (target_kind, target_id, occurred_at DESC);
-
--- 権限分離（マイグレーションで実行）
-REVOKE UPDATE, DELETE ON audit_logs FROM PUBLIC;
--- アプリ用ロール（後述）に INSERT / SELECT のみ付与
+  id_bin        BINARY(16) PRIMARY KEY,
+  occurred_at   DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  actor_id_bin  BINARY(16),
+  actor_kind    ENUM('user','public_viewer','system') NOT NULL,
+  action        VARCHAR(64) NOT NULL,
+  target_kind   VARCHAR(32) NOT NULL,
+  target_id_bin BINARY(16),
+  details_json  JSON NOT NULL,
+  ip_addr       VARBINARY(16),
+  user_agent    VARCHAR(512),
+  irreversible  TINYINT(1) NOT NULL DEFAULT 0,
+  KEY idx_audit_logs_actor_time (actor_id_bin, occurred_at DESC),
+  KEY idx_audit_logs_target     (target_kind, target_id_bin, occurred_at DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- アップロードセッション
 CREATE TABLE upload_sessions (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_id         UUID NOT NULL REFERENCES users(id),
-  parent_folder_id UUID REFERENCES folders(id),
-  filename         TEXT NOT NULL,
-  size_total       BIGINT NOT NULL,
-  size_received    BIGINT NOT NULL DEFAULT 0,
-  storage_key      TEXT NOT NULL,
-  if_match         TEXT,
-  if_none_match    TEXT,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at       TIMESTAMPTZ NOT NULL,
-  completed_at     TIMESTAMPTZ
-);
-CREATE INDEX idx_upload_sessions_expiry ON upload_sessions (expires_at) WHERE completed_at IS NULL;
+  id_bin               BINARY(16) PRIMARY KEY,
+  owner_id_bin         BINARY(16) NOT NULL,
+  parent_folder_id_bin BINARY(16),
+  filename             VARCHAR(255) NOT NULL,
+  size_total           BIGINT NOT NULL,
+  size_received        BIGINT NOT NULL DEFAULT 0,
+  storage_key          VARCHAR(512) NOT NULL,
+  if_match             VARCHAR(64),
+  if_none_match        VARCHAR(8),
+  created_at           DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  expires_at           DATETIME(6) NOT NULL,
+  completed_at         DATETIME(6),
+  KEY idx_upload_sessions_expiry (expires_at, completed_at),
+  CONSTRAINT fk_us_owner FOREIGN KEY (owner_id_bin) REFERENCES users(id_bin)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- セッション
 CREATE TABLE sessions (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at   TIMESTAMPTZ NOT NULL,
-  ip_addr      INET,
-  user_agent   TEXT
-);
-CREATE INDEX idx_sessions_user ON sessions (user_id);
-CREATE INDEX idx_sessions_expiry ON sessions (expires_at);
+  id_bin       BINARY(16) PRIMARY KEY,
+  user_id_bin  BINARY(16) NOT NULL,
+  created_at   DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  last_seen_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  expires_at   DATETIME(6) NOT NULL,
+  ip_addr      VARBINARY(16),
+  user_agent   VARCHAR(512),
+  KEY idx_sessions_user (user_id_bin),
+  KEY idx_sessions_expiry (expires_at),
+  CONSTRAINT fk_sessions_user FOREIGN KEY (user_id_bin) REFERENCES users(id_bin) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- レート制限（IP / アカウント単位）
 CREATE TABLE rate_limit_buckets (
-  bucket_key   TEXT PRIMARY KEY,         -- 例 'login:ip:203.0.113.1' or 'login:user:abc'
-  tokens       DOUBLE PRECISION NOT NULL,
-  refilled_at  TIMESTAMPTZ NOT NULL,
-  expires_at   TIMESTAMPTZ NOT NULL
-);
+  bucket_key   VARCHAR(255) PRIMARY KEY,
+  tokens       DOUBLE NOT NULL,
+  refilled_at  DATETIME(6) NOT NULL,
+  expires_at   DATETIME(6) NOT NULL,
+  KEY idx_rate_limit_expiry (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 ```
 
-### 4.1 DB ロール分離
+### 4.1 同名 active 一意性
+
+PostgreSQL の部分インデックスが無いため、`(owner_id_bin, path)` への UNIQUE は使わず：
 
 ```sql
--- 通常アプリロール
-CREATE ROLE sync_app LOGIN PASSWORD '<from secrets manager>';
-GRANT CONNECT ON DATABASE sync TO sync_app;
-GRANT USAGE ON SCHEMA public TO sync_app;
-GRANT SELECT, INSERT, UPDATE, DELETE
-  ON ALL TABLES IN SCHEMA public TO sync_app;
--- ただし audit_logs は INSERT/SELECT のみ
-REVOKE UPDATE, DELETE ON audit_logs FROM sync_app;
-
--- マイグレーションロール（DDL 専用）
-CREATE ROLE sync_migrate LOGIN PASSWORD '<from secrets manager>';
-GRANT CREATE ON SCHEMA public TO sync_migrate;
-GRANT ALL ON ALL TABLES IN SCHEMA public TO sync_migrate;
+-- アプリ層の擬似コード:
+BEGIN;
+SELECT id_bin FROM files
+ WHERE owner_id_bin = ? AND path = ? AND state = 'active'
+ FOR UPDATE;
+-- なければ INSERT、あれば UPDATE（OCC）
+COMMIT;
 ```
+
+ロックは `FOR UPDATE` で行ベースロック。Replica では `FOR UPDATE` が許可されないため、必ず Writer (Primary) で実行。
+
+### 4.2 DB ロール分離
+
+```sql
+-- アプリロール（DML 専用）
+CREATE USER 'sync_app'@'%' IDENTIFIED BY '<from secrets manager>' REQUIRE SSL;
+GRANT SELECT, INSERT, UPDATE, DELETE ON sync.* TO 'sync_app'@'%';
+-- 監査ログは INSERT/SELECT のみ
+REVOKE UPDATE, DELETE ON sync.audit_logs FROM 'sync_app'@'%';
+
+-- マイグレーションロール
+CREATE USER 'sync_migrate'@'%' IDENTIFIED BY '<from secrets manager>' REQUIRE SSL;
+GRANT ALL PRIVILEGES ON sync.* TO 'sync_migrate'@'%';
+```
+
+Read Replica にはアプリ用の `sync_app` 同名・同 password でレプリケーション。Reader 接続でも `INSERT/UPDATE/DELETE` を呼んでも MySQL Replica は `--read-only` を持つため拒否される（保険）。
+
+### 4.3 文字セット
+
+`utf8mb4`（4 バイト UTF-8、絵文字対応）。照合は `utf8mb4_0900_ai_ci`（MySQL 8 デフォルト、UCA 9.0 ベース）。NFC 正規化はアプリ層で行う。
 
 ## 5. S3 Files 上のファイル配置規則
 
 ```
 /var/data/                                      ← S3 Files マウントポイント
 ├── owner-{user_uuid}/
-│   ├── current/
-│   │   └── {file_uuid}                         ← 現行版の暗号文
-│   ├── trash/
-│   │   └── {file_uuid}                         ← 旧設計の名残（v1 では使用しない）
-│   ├── tmp/
-│   │   └── {upload_session_uuid}.part          ← アップロード中の一時
-│   └── versions/
-│       └── {file_uuid}/
-│           ├── v1
-│           ├── v2
-│           └── ...
+│   ├── current/{file_uuid}                     ← 現行版の暗号文
+│   ├── tmp/{upload_session_uuid}.part          ← アップロード中の一時
+│   └── versions/{file_uuid}/v{N}               ← 旧版
 └── _system/
     ├── kek/                                    ← 鍵階層 (07-security 参照)
-    └── healthcheck.txt                          ← S3 Files 動作確認用
+    └── healthcheck.txt
 ```
 
 設計ポイント：
 
-- **ファイル名は UUID 固定**：リネームを O(1) で（DB 上の `path` と `name` だけ更新、S3 のキーは不変）
-- **ソフト削除中もファイル本体は `current/` に置いたまま**：`deleted_at` を立てるだけ
+- **ファイル名は UUID 固定**：リネームを O(1) で
+- **ソフト削除中もファイル本体は `current/` に残す**：`deleted_at` を立てるだけ
 - **物理削除（purge）時のみ S3 オブジェクトに DeleteMarker を付与**
-- **バージョンは `versions/{file_uuid}/v{N}` に明示的に保存**：S3 バケットバージョニングと二重管理になるが、明示的なほうが障害解析時に追いやすい
-- 注意: S3 Files は POSIX ライクなので `os.Rename` は同一ファイルシステム内で原子的に動作するはず（NFS v4.1+ 規定）。ただしクラッシュ時の挙動は要検証（[`13-risks-and-open-questions.md`](./13-risks-and-open-questions.md) §3 参照）
+- **バージョンは `versions/{file_uuid}/v{N}` に明示的に保存**
+- 注意: NFS v4.1+ の `os.Rename` は同 FS 内アトミックの規定。AWS 実装の挙動は実機検証（[`13`](./13-risks-and-open-questions.md) §3）
 
 ## 6. メタデータと S3 Files の整合性
 
-ファイル本体（S3 Files）とメタデータ（RDS）は **2 種類のリソース** で、Postgres トランザクションでは原子的に変更できない。本設計では以下のルールで整合性を保つ：
+ファイル本体（S3 Files）とメタデータ（MySQL）は別リソース。原子的トランザクションは張れない。本設計では以下のルールで整合性を保つ：
 
 ### 6.1 書き込み順（commit-after-write）
 
 ```
-1. Acquire OCC (SELECT current version + check If-Match)
+1. Acquire OCC (Primary 上で SELECT FOR UPDATE current version + check If-Match)
 2. Write encrypted bytes to /var/data/.../tmp/{upload_uuid}
-3. fsync(2) ※ NFS v4.1+ では best-effort であることに注意
-4. os.Rename(tmp → current/{file_uuid})  -- 原子的、同 FS 内
-5. BEGIN; INSERT file_versions; UPDATE files SET current_version_id = new; INSERT audit_log; COMMIT;
-6. （DB COMMIT 失敗時）孤児ファイルを掃除する補正ジョブ（後述 §6.3）
+3. fsync(2)  -- NFS では best-effort、後段の SHA-256 検証で補強
+4. os.Rename(tmp → current/{file_uuid})  -- 同 FS 内、原子的
+5. BEGIN; INSERT file_versions; UPDATE files SET current_version_id_bin = new; INSERT audit_log; COMMIT;
+6. （DB COMMIT 失敗時）孤児ファイル補正ジョブが /_orphan に隔離
+7. レスポンスを返す前に context.WithReadAfterWrite(ctx) を仕込み、
+   直後の取得は Primary を読む（Replica 遅延の影響を回避）
 ```
 
 ### 6.2 読み取り
 
 ```
-1. SELECT files WHERE id = ? AND state = 'active'
-2. open(/var/data/.../current/{file_uuid})  -- AES-GCM 復号して stream
+1. SELECT files (DBRouter.Reader = 通常は Replica、RAW window 中は Primary)
+2. open(/var/data/.../current/{file_uuid})
+3. AES-GCM 復号して stream
 ```
 
 ### 6.3 補正ジョブ（reconciliation）
 
-- **孤児ファイル検出**: 1 日 1 回、`/var/data/owner-*/current/` を走査し、対応する `files` レコードがないものを `_orphan/` へ移動（即削除はしない）
-- **メタデータ孤児検出**: `files` テーブルで `state = 'active'` だが S3 Files 上のオブジェクトが存在しないものを検出してアラート
+- **孤児ファイル検出**: 1 日 1 回、`/var/data/owner-*/current/` を走査し、対応する `files` レコードがないものを `/_orphan/` へ移動
+- **メタデータ孤児検出**: `files` で `state = 'active'` だが S3 Files 上のオブジェクトが存在しないものを検出してアラート
 - **`upload_sessions.expires_at < now()` のクリーンアップ**: 1 時間ごとに走査し、`tmp/*.part` を削除
 
 ## 7. ストアドプロシージャ vs アプリ層
 
-設計判断：**ストアドプロシージャは使わない**。理由：
-
-- Go ですべてのロジックを書ける
-- DB 移植性を維持（Postgres ロックインだが、極端なベンダー機能には依存しない）
-- 監査・テスト容易性
-
-例外として、`audit_logs` への INSERT を `BEFORE` トリガで強制する案は **不採用**。アプリ側で必ず INSERT する責務を負う（テストでカバー）。
+**ストアドプロシージャは使わない**。理由は変更管理・テスト・移植性。例外として、`audit_logs` のトリガでの強制 INSERT は採用しない（アプリが必ず INSERT する責務を負い、テストでカバー）。
 
 ## 8. 不変条件の DB 制約への落とし込み
 
-| 不変条件 | DB 制約 |
+| 不変条件 | DB 制約・補強 |
 |---|---|
-| INV-1 物理削除は二段階 | `state` の CHECK 制約 + アプリ側の遷移ロジック |
+| INV-1 物理削除は二段階 | `state` ENUM + アプリ側の遷移ロジック |
 | INV-2 書き込みは累積 | `file_versions` への INSERT を強制（アプリ層） + S3 バージョニング ON |
-| INV-4 未完了は本番に反映しない | `state = 'draft'` 状態を経由する。`upload_sessions` が COMMIT 後にのみ `files` レコードを作る |
-| INV-5 破壊的操作の確認 | UI 側 + サーバ側の二段確認（強制上書き等） |
+| INV-4 未完了は本番に反映しない | `state = 'draft'` 状態を経由。`upload_sessions` が COMMIT 後にのみ `files` を更新 |
+| INV-5 破壊的操作の確認 | UI 側 + サーバ側の二段確認 |
 
 ## 9. 命名規則
 
 - テーブル名は複数形 snake_case (`files`, `file_versions`)
 - 列名は snake_case
-- 主キーは `id`（UUID v4）
-- 外部キーは `<entity>_id`
-- タイムスタンプは `timestamptz`、サーバ DB は UTC で保存
-- ENUM 風の列は CHECK 制約 + TEXT で表現（PostgreSQL の ENUM 型は移行しづらいため不採用）
+- 主キーは `id_bin`（BINARY(16) = UUID v4）。アプリ側で `uuid.UUID` として扱う
+- 外部キーは `<entity>_id_bin`
+- タイムスタンプは `DATETIME(6)`、サーバ DB は UTC で保存（タイムゾーン管理は app の責務）
+- `ENUM` を採用（値の追加に弱いが、実用上 v1 で増えない見込み。増えるなら CHECK + VARCHAR に切替）
+
+## 10. リポジトリ層と DBRouter
+
+```go
+// internal/repo/repo.go
+type FilesReader interface {
+    GetByID(ctx context.Context, id uuid.UUID) (*domain.File, error)
+    ListByOwner(ctx context.Context, ownerID uuid.UUID, opts ListOpts) ([]*domain.File, error)
+    Search(ctx context.Context, ownerID uuid.UUID, q string) ([]*domain.File, error)
+}
+
+type FilesWriter interface {
+    Insert(ctx context.Context, tx *sql.Tx, f *domain.File) error
+    UpdateVersion(ctx context.Context, tx *sql.Tx, fileID, newVersionID uuid.UUID) error
+    SoftDelete(ctx context.Context, tx *sql.Tx, fileID uuid.UUID) error
+    Purge(ctx context.Context, tx *sql.Tx, fileID uuid.UUID) error
+    SelectForUpdate(ctx context.Context, tx *sql.Tx, ownerID uuid.UUID, path string) (*domain.File, error)
+}
+
+type FilesRepo struct {
+    router *DBRouter
+}
+
+func (r *FilesRepo) GetByID(ctx context.Context, id uuid.UUID) (*domain.File, error) {
+    db := r.router.Reader(ctx) // RAW window 中は Primary
+    return queryFile(ctx, db, id)
+}
+
+func (r *FilesRepo) BeginWrite(ctx context.Context) (*sql.Tx, error) {
+    return r.router.Writer(ctx).BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+}
+```
+
+ハンドラ：
+
+```go
+func uploadHandler(repo *FilesRepo) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        ctx := r.Context()
+        tx, _ := repo.BeginWrite(ctx)
+        defer tx.Rollback()
+
+        cur, _ := repo.SelectForUpdate(ctx, tx, ownerID, path)
+        // OCC ロジック...
+        repo.Insert(ctx, tx, newFile)
+        repo.UpdateVersion(ctx, tx, fileID, newVersionID)
+        tx.Commit()
+
+        // 直後のレスポンス用 read を Primary に向ける
+        ctx = repo.router.WithReadAfterWrite(ctx)
+        f, _ := repo.GetByID(ctx, fileID)
+        renderFileRow(w, f)
+    }
+}
+```
+
+これにより、ハンドラは「どの DB を使うか」を細かく知らずに済む。
 
 ---
 

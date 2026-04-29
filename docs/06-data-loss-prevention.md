@@ -48,7 +48,7 @@
 | 原因 | 対策 | 設計上の節 |
 |---|---|---|
 | B-1 アプリバグ | (1) 不変条件を契約（`go test` で検証） (2) 構造化ログで原因追跡 (3) 監査ログから影響特定 | [`11`](./11-testing-strategy.md) |
-| B-2 DB 不整合 | (1) RDS PITR (point-in-time recovery) 30 日 (2) 補正ジョブ（孤児検出） | [`02`](./02-architecture.md) §3.4, [`03`](./03-domain-model.md) §6.3 |
+| B-2 DB 不整合 | (1) RDS MySQL PITR（binlog） 30 日 (2) 補正ジョブ（孤児検出） (3) Read Replica の遅延を監視・縮退運転 | [`02`](./02-architecture.md) §3.6, [`03`](./03-domain-model.md) §6.3 |
 | B-3 ストレージ障害 | (1) S3 11 ナイン (2) S3 バケットバージョニング (3) S3 同一リージョン内の冗長配置 | [`02`](./02-architecture.md) §3.5 |
 | B-4 アップロード中断 | (1) tmp 分離 + os.Rename 原子 (2) tus.io レジューム (3) SHA-256 検証 | [`04`](./04-sync-semantics.md) §6, INV-4 |
 | B-5 デプロイ事故 | (1) スキーマは前方互換マイグレーション (2) ロールバック手順 (3) DB マイグレーションは backward-compatible に分割 | [`10`](./10-operations.md) §3 |
@@ -126,7 +126,7 @@ L1〜L5 が個別操作で常時稼働。L6 はインフラ事故。L7 は AWS �
                └── ない
                      │
                      ▼
-               ステップ 3: RDS PITR で 30 日以内のスナップショットから復元
+               ステップ 3: RDS MySQL PITR（binlog 利用）で 30 日以内に復元
                      │
                      ▼
                ステップ 4: S3 バージョニングを直接調査
@@ -201,6 +201,8 @@ L1〜L5 が個別操作で常時稼働。L6 はインフラ事故。L7 は AWS �
 
 | パターン | 何が悪いか |
 |---|---|
+| Reader ハンドルから書き込みクエリを発行 | DBRouter 設計の意図に反する。MySQL Replica の `--read-only` で拒否される保険はあるが、コード上は禁止 |
+| RAW window を考慮せず Reader を使う | 自分の書き込み直後に Replica 遅延で見えない事象が起きる。`WithReadAfterWrite` を必ず使う |
 | `os.Remove` でいきなり物理削除 | INV-1 違反。ソフト削除を経ること |
 | 「上書きで旧版が消える」実装 | INV-2 違反。常に file_versions に追加 |
 | `If-Match` ヘッダなしのアップロードを許容 | OCC 機能が無意味化。428 で拒否 |

@@ -4,6 +4,13 @@
 
 **個人専用のオンラインファイル同期サービス**。Web ブラウザから複数端末（PC・スマホ・タブレット）の間でファイルをアップロード・ダウンロード・整理し、サーバ側で「真実の唯一の場所」を保つ。Dropbox / Google Drive を「自分専用にもう一段シンプルに」した姿に近い。
 
+技術スタック（要約）：
+- **バックエンド**: Go（標準ライブラリ中心）+ HTMX 4.x
+- **DB**: RDS for MySQL 8.0（Primary + Read Replica、`DBRouter` で読み書き分離）
+- **ストレージ**: S3 Files（NFS マウント）+ S3 backend（バージョニング ON）
+- **インフラ**: Docker + Terraform + ECR + ECS Fargate（arm64）
+- **外部公開**: Cloudflare Tunnel（`cloudflared` サイドカー）+ サイドカー nginx（ALB は不採用）
+
 ## 2. プロダクトゴール
 
 | 優先度 | ゴール | 達成の指標 |
@@ -74,30 +81,32 @@
 
 ```
 ┌──────────────────────── ユーザの世界 ────────────────────────┐
-│                                                              │
-│  [PC ブラウザ]   [スマホ ブラウザ]   [タブレット ブラウザ]    │
-│         \\                |                /                  │
-│          \\               |               /                   │
-│           ↓               ↓              ↓                    │
-│         HTTPS (TLS 1.3)  + HTMX requests                      │
-└────────────────────────────│─────────────────────────────────┘
-                             ▼
-┌─────────────────────── AWS の世界 ───────────────────────────┐
-│                                                              │
-│   [Route53] ──→ [ALB] ──→ [ECS Fargate (Go + HTMX)]           │
-│                                  │                            │
-│                  ┌───────────────┴───────────────┐            │
-│                  ▼                               ▼            │
-│          [RDS PostgreSQL]              [S3 Files (NFS マウント)]│
-│           - メタデータ                  - ファイル本体          │
-│           - 監査ログ                    - バージョニング有効    │
-│           - 公開リンク                  - サーバ側暗号化         │
-│                                                              │
-│   [Secrets Manager]   [CloudWatch]   [SES (任意)]             │
-└──────────────────────────────────────────────────────────────┘
+│  [PC]   [スマホ]   [タブレット]    すべてブラウザのみ          │
+└──────────────────────────│─────────────────────────────────┘
+                           │ HTTPS / TLS 1.3
+                           ▼
+                ┌──────────────────────┐
+                │   Cloudflare Edge    │
+                │   DNS / TLS / DDoS   │
+                └──────────┬───────────┘
+                           │ Cloudflare Tunnel (outbound only)
+                           ▼
+┌─────────────────────── AWS の世界 (ap-northeast-1) ───────────┐
+│                                                                │
+│   ECS Fargate Task: cloudflared → nginx → app (Go)             │
+│                                  │                              │
+│                   ┌──────────────┴──────────────────┐           │
+│                   ▼                                 ▼           │
+│           [RDS MySQL]                    [S3 Files (NFS)]       │
+│           Primary (Write/RAW)            ファイル本体            │
+│           Read Replica × 1               バージョニング ON      │
+│           (binlog 経由で同期)             SSE-S3 既定            │
+│                                                                │
+│   [Secrets Manager]   [CloudWatch]   [VPC Endpoints]           │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-詳細は [`02-architecture.md`](./02-architecture.md) を参照。
+詳細は [`02-architecture.md`](./02-architecture.md) を参照。ALB を不採用にした経緯は [ADR-007](./adr/ADR-007-cloudflare-tunnel-not-alb.md)、Primary を守る MySQL 設計は [ADR-008](./adr/ADR-008-mysql-read-replica-write-ahead.md)。
 
 ## 7. 用語集
 

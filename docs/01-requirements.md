@@ -60,7 +60,7 @@
 | F-1.1 | ユーザは Email + パスワードでサインアップできる | Email 確認なしでもログイン可能（個人専用のため）。ただしパスワード強度チェックあり |
 | F-1.2 | パスワードは Argon2id で保存 | 設計書 [`07-security.md`](./07-security.md) §3.1 に従う |
 | F-1.3 | 二要素認証として TOTP（RFC 6238）を必須化 | 設定後、ログイン時に TOTP コード入力を要求。バックアップコード 10 個発行 |
-| F-1.4 | セッションは安全な Cookie + サーバ側セッションストア（PostgreSQL） | HttpOnly / Secure / SameSite=Lax。有効期限 7 日（再延長あり） |
+| F-1.4 | セッションは安全な Cookie + サーバ側セッションストア（MySQL Primary） | HttpOnly / Secure / SameSite=Lax。有効期限 7 日（再延長あり） |
 | F-1.5 | パスワード変更時に全セッション失効 | サーバ側セッションテーブルから当該 user_id を一括削除 |
 | F-1.6 | レート制限：ログイン失敗 5 回 / 15 分 でアカウントを 15 分ロック | IP ベースとアカウントベースの両方 |
 | F-1.7 | 個人専用とはいえ、ロール概念を内部的に持つ（owner / public-link-viewer） | 公開リンクの閲覧者を `owner` と区別する目的。テーブル設計に反映 |
@@ -138,7 +138,7 @@
 | F-3.2 | フォルダ名・ファイル名は Unicode NFC 正規化して保存・比較 | macOS の NFD 問題回避 |
 | F-3.3 | ファイル名の最大長は 255 文字（UTF-8 bytes ではなく Unicode 文字単位） | |
 | F-3.4 | 1 ファイルに 0〜10 個のタグを付けられる | |
-| F-3.5 | ファイル名・タグ検索は PostgreSQL の `pg_trgm` を使用 | 100ms 以内に応答 |
+| F-3.5 | ファイル名・タグ検索は MySQL の FULLTEXT INDEX (parser=ngram) を使用 | 100ms 以内に応答（Read Replica で実行） |
 | F-3.6 | 検索結果は最近順（更新日時 DESC） | |
 
 ### F-4. 共有：公開リンク
@@ -216,7 +216,7 @@
 
 | ID | 要件 |
 |---|---|
-| N-3.1 | TLS 1.3 のみを許可（TLS 1.2 は ALB の制約により併存可） |
+| N-3.1 | TLS 1.3 を Cloudflare Edge で終端。Cloudflare ↔ cloudflared は QUIC ベースのトンネル暗号化 |
 | N-3.2 | OWASP Top 10（A01〜A10）に対する対策実装（[`07-security.md`](./07-security.md)） |
 | N-3.3 | 保存時暗号化：アプリ層 AES-256-GCM + S3 SSE の多重防御 |
 | N-3.4 | 認証情報・暗号鍵は AWS Secrets Manager で管理、IAM で最小権限 |
@@ -262,8 +262,8 @@
 | ID | 要件 |
 |---|---|
 | N-7.1 | バックエンドは Go 標準ライブラリ中心（`net/http`, `database/sql`, `html/template`, `crypto/*`, `encoding/json`） |
-| N-7.2 | 外部依存は最小化（Postgres ドライバ、tus サーバライブラリ、テストヘルパー、AWS SDK 一部のみ） |
-| N-7.3 | ローカル開発は `docker compose up` で完結（PostgreSQL + MinIO + アプリ） |
+| N-7.2 | 外部依存は最小化（go-sql-driver/mysql、tus サーバライブラリ、テストヘルパー、AWS SDK 一部のみ） |
+| N-7.3 | ローカル開発は `docker compose up` で完結（MySQL + アプリ + nginx） |
 | N-7.4 | Make / Just タスクで build / test / lint / migrate / run を一発実行 |
 
 ### N-8. アクセシビリティ
@@ -298,7 +298,7 @@
 
 - バックエンド: Go 1.23+ 標準ライブラリ中心
 - フロント: HTMX 4.x + Vanilla CSS（Tailwind 等の大型 CSS フレームワークは不採用）
-- DB: PostgreSQL 16+ on RDS
+- DB: MySQL 8.0.x on RDS（Primary Multi-AZ + Read Replica × 1）
 - ストレージ: S3 Files（NFS v4.1+ マウント）
 - 認証: 自前実装（Argon2id + TOTP）
 

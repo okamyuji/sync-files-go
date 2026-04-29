@@ -36,7 +36,11 @@ CloudWatch Embedded Metric Format（EMF）でアプリから出力：
 | `Auth.Failures.PerUser` | Count | > 10 / 15min |
 | `Auth.Failures.PerIP` | Count | > 100 / 15min |
 | `RequestDuration.p95` | Milliseconds | > 1000 |
-| `RDSConnPool.Utilization` | Percent | > 90 |
+| `DBPoolUtilization.Primary` | Percent | > 90 |
+| `DBPoolUtilization.Replica` | Percent | > 90 |
+| `ReplicaLagSeconds` | Seconds | > 10 |
+| `ForcedPrimaryReadsByDegrade` | Count / 5min | — (情報) |
+| `CloudflareTunnel.Reconnects` | Count / 5min | > 5 |
 
 ### 1.3 トレーシング
 
@@ -49,11 +53,13 @@ GET /healthz
   → 200: アプリプロセスが生きている (即時応答、依存はチェックしない)
 
 GET /readyz
-  → 200: DB 接続 OK + S3 Files マウント OK
+  → 200: DB Primary + Replica 接続 OK + S3 Files マウント OK
   → 503: 何か NG
 ```
 
-ALB は `/healthz` を使用。Kubernetes 流の readiness は使わないが、`/readyz` は手動確認用に提供。
+- ECS タスクヘルスチェック：`/healthz`（ALB は使わないので、これがプライマリ）
+- nginx 内 `location /healthz` で app へ proxy
+- cloudflared は自身の outbound 接続健全性を独自にレポート（CloudWatch メトリクス）
 
 ## 2. デプロイ手順
 
@@ -64,19 +70,20 @@ ALB は `/healthz` を使用。Kubernetes 流の readiness は使わないが、
 make test
 make lint
 
-# 2. Docker イメージビルド & プッシュ
+# 2. Docker イメージビルド & プッシュ（app と nginx の 2 イメージ）
 export IMAGE_TAG=$(git rev-parse --short HEAD)-$(date +%Y%m%d%H%M)
-make docker-build TAG=$IMAGE_TAG
+make docker-build-app   TAG=$IMAGE_TAG
+make docker-build-nginx TAG=$IMAGE_TAG
 make ecr-login
-make docker-push TAG=$IMAGE_TAG
+make docker-push        TAG=$IMAGE_TAG
 
 # 3. Terraform plan & apply
 cd deploy/terraform/envs/prod
 terraform plan -var "image_tag=$IMAGE_TAG" -out=plan.out
 terraform apply plan.out
 
-# 4. ECS Service が rolling update を実行
-# 5. デプロイ後、smoke test
+# 4. ECS が rolling update を実行（cloudflared が新タスクで Tunnel 再接続）
+# 5. デプロイ後、smoke test（Cloudflare 経由でアクセス）
 make smoke-test BASE_URL=https://sync.example.com
 ```
 
@@ -117,14 +124,37 @@ aws s3files create-access-point \
 
 将来 Terraform が対応したら IaC に取り込む。
 
+### 2.4 Cloudflare Tunnel のセットアップ
+
+```
+1. Cloudflare ダッシュボード → Zero Trust → Networks → Tunnels
+2. 「Create Tunnel」→ 名前: sync-files-go-prod
+3. 認証トークンが表示される。これをコピー
+4. Public Hostname を追加:
+   - Subdomain: sync
+   - Domain: example.com
+   - Service: HTTPS://localhost:8443
+   - Additional application settings → TLS:
+       Origin Server Name: sync.example.com
+       No TLS Verify: true   (内部の自己署名証明書を許可)
+5. AWS Secrets Manager:
+   aws secretsmanager put-secret-value \
+     --secret-id sync-files-go/prod/cloudflared/token \
+     --secret-string "<コピーしたトークン>"
+6. ECS Service を Force New Deployment して反映
+```
+
+Tunnel の認証トークンはローテーション可能（Cloudflare ダッシュボードで再発行 → Secrets Manager 更新 → 再デプロイ）。
+
 ## 3. データベースマイグレーション
 
 ### 3.1 ツール
 
-- 標準ライブラリ志向で `golang-migrate/migrate` を採用（`database/sql` を直接使う薄いラッパ）
+- 標準ライブラリ志向で `golang-migrate/migrate` を採用（`database/sql` を直接使う薄いラッパ、MySQL ドライバ経由）
 - マイグレーションは `up` のみ前提（forward-only）
 - `down` は緊急用に提供するが、本番では使わない
 - ランタイムから自動マイグレーションは「初回起動 + 環境変数 `AUTO_MIGRATE=1`」のみ。通常は別タスクで実行
+- Read Replica は Primary の binlog 経由で自動的に DDL を反映する
 
 ### 3.2 マイグレーション戦略
 
@@ -148,8 +178,9 @@ make db-migrate ENV=prod    # ECS RunTask でマイグレーションタスク�
 
 | 対象 | 方式 | 保持期間 |
 |---|---|---|
-| RDS | 自動バックアップ + PITR | 30 日 |
-| RDS | 手動スナップショット（月 1） | 12 ヶ月 |
+| RDS Primary | 自動バックアップ + PITR（binlog 利用） | 30 日 |
+| RDS Primary | 手動スナップショット（月 1） | 12 ヶ月 |
+| RDS Read Replica | バックアップ無効（Primary を信頼） | — |
 | S3 Files | バケットバージョニング | 90 日（旧版） |
 | Terraform state | S3 backend + バージョニング | 無期限 |
 | シークレット | Secrets Manager の自動世代管理 | 30 日 |
@@ -168,7 +199,7 @@ aws rds restore-db-instance-to-point-in-time \
   --no-publicly-accessible
 
 # 検証
-psql -h <new-endpoint> -U rdsadmin -d sync -c "SELECT count(*) FROM files;"
+mysql -h <new-endpoint> -u rdsadmin -p sync -e "SELECT count(*) FROM files;"
 
 # 切替
 # 1. アプリの DB_HOST を新エンドポイントに変更（Secrets / 環境変数）
@@ -220,17 +251,24 @@ CLI は ECS Exec から実行し、操作はすべて `audit_logs` に `actor_ki
 
 ### 5.2 ケース別
 
-#### A. アプリが応答しない（5xx 100% / 1 分継続）
+#### A. アプリが応答しない（外部から到達できない）
 
 ```
-1. ECS Service の Status を確認
-2. タスクが再起動を繰り返している?
-   YES → CloudWatch Logs で起動エラー確認
-   NO  → ALB の Target Group 健全性確認
-3. RDS が落ちている? → RDS Status を確認
-4. S3 Files が落ちている? → /var/data でファイル read を試す
-5. Secret 取得失敗? → IAM ロールと Secret ARN を確認
-6. 暫定: 直近のイメージにロールバック
+1. Cloudflare ダッシュボードで Tunnel ステータス確認
+   - Tunnel が「Healthy」か?
+   - 「No Connectors」なら ECS タスクの cloudflared が動いていない
+2. ECS Service の Status を確認
+   - desiredCount = runningCount?
+   - タスクが再起動ループ?
+3. CloudWatch Logs を 3 ストリーム確認:
+   - app: 起動エラー / DB 接続エラー
+   - nginx: 設定構文エラー / TLS エラー
+   - cloudflared: トークン不正 / Cloudflare 側へのトンネル接続失敗
+4. RDS Primary / Replica が落ちている? → RDS Status を確認
+5. S3 Files が落ちている? → ECS Exec で /var/data に ls
+6. Secret 取得失敗? → IAM ロールと Secret ARN を確認
+7. 暫定: 直近のイメージにロールバック
+8. Cloudflare 障害で長期に解決しない場合: §5.E の ALB 緊急起動
 ```
 
 #### B. ファイルが消えた（ユーザ報告）
@@ -247,7 +285,7 @@ CLI は ECS Exec から実行し、操作はすべて `audit_logs` に `actor_ki
 #### C. アップロードが必ず失敗する
 
 ```
-1. Network: ALB ヘルスチェック OK?
+1. Network: Cloudflare Tunnel ヘルス OK? ECS タスクヘルスチェック OK?
 2. Storage: S3 Files マウント OK? df -h /var/data
 3. DB: 接続プール枯渇? select count(*) from pg_stat_activity;
 4. アプリ: アップロード失敗ログを確認
@@ -258,9 +296,11 @@ CLI は ECS Exec から実行し、操作はすべて `audit_logs` に `actor_ki
 
 ```
 1. CloudWatch アラート (Auth.Failures.PerIP > 100/15min) を確認
-2. 攻撃 IP を特定 → ALB の listener rule で deny ルール追加
-3. 攻撃された account の確認 → 必要ならロック延長
-4. AWS WAF を有効化検討（v2）
+2. 攻撃 IP を特定（CF-Connecting-IP）
+3. Cloudflare Firewall Rules で当該 IP / ASN を block
+4. 攻撃された account の確認 → 必要ならロック延長
+5. Cloudflare Bot Fight Mode（Free 可）を一時有効化
+6. AWS WAF / Cloudflare Pro 移行検討（v2）
 ```
 
 #### E. AWS 課金高騰
@@ -270,6 +310,33 @@ CLI は ECS Exec から実行し、操作はすべて `audit_logs` に `actor_ki
 2. 上昇要因: データ転送 / S3 Files 同期リクエスト / Fargate オートスケール
 3. 短期: AutoScaling 上限を一時的に下げる
 4. 長期: コスト最適化（後述 §8）
+```
+
+#### F. Cloudflare 障害（長期にユーザが到達不能）
+
+ALB を緊急起動して Cloudflare をバイパス：
+
+```
+1. Terraform で予備の ALB モジュールを apply
+   cd deploy/terraform/envs/prod
+   terraform apply -var "enable_emergency_alb=true"
+   ※ ALB / ACM 証明書 / Public Subnet / 関連 SG を一時作成
+2. ECS Service の load_balancer ブロックを ALB に向けるように更新
+3. DNS を一時的に Cloudflare 外（Route 53）に切替
+4. Cloudflare 復旧後、逆順で戻す
+```
+
+事前に予備 ALB の Terraform モジュールを作っておく（apply はしない）。実際の起動は分単位で可能。
+
+#### G. Replica 遅延が高止まり
+
+```
+1. CloudWatch ReplicaLag メトリクスで継続時間を確認
+2. アプリ側で replicaDegraded = true（自動）が発火していること
+3. Primary に読み取りが集中して CPU 90% 以上か確認
+4. 重い管理画面 SQL（アクティビティタイムラインなど）に context.WithTimeout が効いているか
+5. Replica 自体の CPU / IO / IO クレジットを確認
+6. 30 分以上継続するなら一時的に Read Replica を再起動 (Primary は無事)
 ```
 
 ### 5.3 完全障害時の手動切替
@@ -312,7 +379,7 @@ CLI は ECS Exec から実行し、操作はすべて `audit_logs` に `actor_ki
 - ECS タスク: CPU / Memory / Disk I/O
 - RDS: ストレージ / 接続数 / Performance Insights
 - S3 / S3 Files: 容量 / リクエスト数 / コスト
-- ALB: LCU 消費
+- Cloudflare 側のリクエスト数（Free プラン上限の確認）
 
 ### 7.2 容量逼迫時の対応
 

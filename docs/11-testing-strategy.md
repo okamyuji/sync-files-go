@@ -9,7 +9,7 @@
                 │   E2E    │  ← Playwright で UI 駆動。〜30 シナリオ
                 │  (slow)  │
                 ├──────────┤
-                │  統合    │  ← 実 Postgres + ローカル FS。〜200 シナリオ
+                │  統合    │  ← 実 MySQL (Primary+Replica) + ローカル FS。〜200 シナリオ
                 │  (medium)│
                 ├──────────┤
                 │  単体    │  ← Go test。〜500 ケース、80% カバレッジ
@@ -73,15 +73,43 @@ func TestOCC_PreconditionResolve(t *testing.T) {
 
 ### 3.1 対象
 
-- 実 PostgreSQL（Docker）に対するリポジトリ層
+- 実 MySQL（Docker、Primary 1 + Replica 1）に対するリポジトリ層
 - 実ファイルシステム（一時ディレクトリ）に対するストレージ層
 - HTTP ハンドラ（`net/http/httptest`）+ DB 接続
 - マイグレーション実行
+- DBRouter のルーティング判断（Reader / Writer / RAW window / 縮退運転）
 
 ### 3.2 ツール
 
-- `dockertest` または `testcontainers-go` を使用検討（最終選定は実装時）
+- `testcontainers-go`（推奨）で MySQL を起動。docker-compose で Primary + Replica 構成も組める
 - ただしテスト時間とのトレードオフを見て、make target で `make test-integration` を分離
+
+### 3.2.1 DBRouter テスト（必須）
+
+ユーザの参考記事の指針に従い、DBRouter のルーティング判断は単独で必ずテストする：
+
+```go
+func TestDBRouter_Routing(t *testing.T) {
+    primary := openTestDB(t, "primary")
+    replica := openTestDB(t, "replica")
+    r := &DBRouter{primary: primary, replica: replica}
+
+    ctx := context.Background()
+    require.Equal(t, primary, r.Writer(ctx), "Writer は常に Primary")
+    require.Equal(t, replica, r.Reader(ctx), "通常時 Reader は Replica")
+
+    raw := WithReadAfterWrite(ctx)
+    require.Equal(t, primary, r.Reader(raw), "RAW window 中は Primary")
+
+    r.replicaDegraded.Store(true)
+    require.Equal(t, primary, r.Reader(ctx), "Replica 縮退中は Primary")
+}
+```
+
+加えて：
+- アップロード直後の取得は Primary を使うことを HTTP レベルで検証（インテグレーションテスト）
+- ファイル一覧表示は Replica を使うことを検証
+- Replica が落ちたら自動的に縮退運転になることを検証
 
 ### 3.3 例
 
@@ -226,7 +254,8 @@ func TestRenameDoesNotMoveStorageObject(t *testing.T) {
 | RDS 一時切断（5 秒） | アプリは 503 を返し、復旧後自動再接続 |
 | S3 Files マウント解除 | アプリは `/readyz` を 503 にし、ユーザには明示的なエラー |
 | 暗号鍵欠損 | アプリは起動を拒否し、CloudWatch にエラー |
-| Postgres 接続プール枯渇 | リクエストはキューイング、タイムアウト時 503 |
+| MySQL Primary 接続プール枯渇 | リクエストはキューイング、タイムアウト時 503。Reader 側に逃がせる読み取りは Replica へ |
+| MySQL Replica 大遅延 | DBRouter が自動で縮退運転（全 read を Primary に寄せる）。重い管理画面 SQL は context.WithTimeout で守る |
 | アップロード中の OOM | tmp/ にゴミが残るが補正ジョブで掃除される |
 
 これらは Chaos Engineering 手法ではないが、`make test-failure` で意図的に注入できる仕組みを用意。
@@ -334,11 +363,11 @@ PR open
   ↓
 3. unit test + coverage check
   ↓
-4. integration test (with postgres + minio container)
+4. integration test (testcontainers-go で mysql:8.0 を Primary/Replica として起動)
   ↓
-5. build docker image
+5. build docker images (app, nginx)
   ↓
-6. trivy image scan
+6. trivy image scan (両方のイメージ)
   ↓
 7. e2e test (subset)  ← merge 前必須
   ↓

@@ -23,7 +23,17 @@ RUN go build -tags=netgo,osusergo \
     -ldflags="-s -w -buildid=" \
     -trimpath \
     -o /out/sync-files-go \
-    ./cmd/server
+    ./cmd/server \
+ && go build -tags=netgo,osusergo \
+    -ldflags="-s -w -buildid=" \
+    -trimpath \
+    -o /out/sync-files-batch \
+    ./cmd/batch \
+ && go build -tags=netgo,osusergo \
+    -ldflags="-s -w -buildid=" \
+    -trimpath \
+    -o /out/sync-files-admin \
+    ./cmd/sync-files-admin
 
 # templates / static (Phase 4 以降で実体が増えていく)
 RUN mkdir -p /out/templates /out/static \
@@ -37,7 +47,9 @@ RUN mkdir -p /out/data && chown -R 65532:65532 /out/data
 # ----- Runtime -----
 FROM gcr.io/distroless/static-debian12:nonroot
 
-COPY --from=build /out/sync-files-go /sync-files-go
+COPY --from=build /out/sync-files-go    /sync-files-go
+COPY --from=build /out/sync-files-batch /sync-files-batch
+COPY --from=build /out/sync-files-admin /sync-files-admin
 COPY --from=build /out/templates /templates
 COPY --from=build /out/static    /static
 COPY --from=build --chown=nonroot:nonroot /out/data /var/data

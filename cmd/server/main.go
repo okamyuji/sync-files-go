@@ -1,7 +1,7 @@
 // sync-files-go HTTP サーバのエントリーポイント。
 //
-// Phase 1 ではヘルスチェックと最小限の起動シーケンスのみ。
-// Phase 3 で internal/http のルータを結線する。
+// Phase 3: DB（MySQL Primary/Replica）と Storage（S3 Files NFS マウント or local FS）を結線し、
+// internal/http/server.go の NewServer を起動する。
 package main
 
 import (
@@ -15,8 +15,14 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
+
 	"github.com/okamyuji/sync-files-go/internal/config"
+	hsrv "github.com/okamyuji/sync-files-go/internal/http"
 	"github.com/okamyuji/sync-files-go/internal/observability"
+	"github.com/okamyuji/sync-files-go/internal/repo"
+	"github.com/okamyuji/sync-files-go/internal/repo/mysql"
+	"github.com/okamyuji/sync-files-go/internal/storage/localfs"
 )
 
 func main() {
@@ -26,8 +32,8 @@ func main() {
 	}
 }
 
+//nolint:gocyclo // 主に依存性注入の結線。意味のある分割は Phase 5 以降で
 func run() error {
-	// healthcheck サブコマンド (Dockerfile の HEALTHCHECK から呼ばれる想定)
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		return healthCheckClient()
 	}
@@ -38,37 +44,47 @@ func run() error {
 	}
 	logger := observability.NewLogger(cfg.LogLevel)
 	logger.Info("starting sync-files-go",
-		"env", cfg.AppEnv,
-		"port", cfg.Port,
-		"data_dir", cfg.DataDir,
+		"env", cfg.AppEnv, "port", cfg.Port, "data_dir", cfg.DataDir,
 	)
 
-	mux := http.NewServeMux()
+	primary, replica, err := hsrv.OpenDBs(cfg)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer func() {
+		_ = primary.Close()
+		_ = replica.Close()
+	}()
 
-	// /healthz: アプリプロセスが生きているかだけ。依存はチェックしない (10-operations.md §1.4)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok\n"))
-	})
+	router := repo.NewDBRouter(primary, replica)
 
-	// /readyz: 依存（DB / S3 Files）の到達確認。Phase 2 で実装拡張。
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok\n"))
-	})
+	store, err := localfs.New(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("init storage: %w", err)
+	}
+
+	deps := &hsrv.Deps{
+		Cfg:          cfg,
+		Logger:       logger,
+		Router:       router,
+		Storage:      store,
+		Users:        mysql.NewUsersRepo(router),
+		Sessions:     mysql.NewSessionsRepo(router),
+		Files:        mysql.NewFilesRepo(router),
+		FileVersions: mysql.NewFileVersionsRepo(router),
+		ShareLinks:   mysql.NewShareLinksRepo(router),
+		Audit:        mysql.NewAuditRepo(router),
+	}
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
-		Handler:           mux,
+		Handler:           hsrv.NewServer(deps),
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      300 * time.Second, // 大容量アップロード考慮
+		WriteTimeout:      300 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

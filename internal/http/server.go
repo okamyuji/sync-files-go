@@ -59,6 +59,13 @@ func NewServer(d *Deps) http.Handler {
 	mux.Handle("DELETE /api/files/{id}", authMW(deleteFileHandler(d)))
 	mux.Handle("POST /api/files/{id}/restore", authMW(restoreFileHandler(d)))
 
+	// 公開リンク（認証必須側）
+	mux.Handle("POST /api/files/{id}/share-links", authMW(createShareLinkHandler(d)))
+	mux.Handle("DELETE /api/share-links/{id}", authMW(revokeShareLinkHandler(d)))
+
+	// 公開リンク（未認証側）。H-2: 判定は ShareLinksRepo が Primary を読む。
+	mux.HandleFunc("GET /share/{token}", publicShareDownloadHandler(d))
+
 	// 共通ミドルウェア (chain)
 	chain := middleware.Chain(mux,
 		middleware.RequestID(),

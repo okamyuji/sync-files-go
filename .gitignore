@@ -68,3 +68,11 @@ temp/
 # UI: サードパーティ JS は make ui-vendor で取得（リポジトリにはコミットしない）
 internal/ui/static/js/htmx.min.js
 internal/ui/static/js/htmx-ext-sse.js
+
+# E2E (Playwright)
+tests/e2e/node_modules/
+tests/e2e/playwright-report/
+tests/e2e/test-results/
+tests/e2e/.cache/
+package-lock.json
+**/package-lock.json

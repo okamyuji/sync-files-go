@@ -33,7 +33,7 @@ HTMX_SSE_VERSION      ?= 2.2.2
 HTMX_SHA256           ?= 64f81e5dee6e4b9d56d6a6bb710c47f4f5a39f9d63ccd64a99ad4c63b7e5d7e8
 UI_VENDOR_DIR         := internal/ui/static/js
 
-.PHONY: help build test test-integration lint fmt vet staticcheck golangci-lint \
+.PHONY: help build test test-integration test-e2e e2e-install lint fmt vet staticcheck golangci-lint \
         tools tools-install tools-check ui-vendor ui-vendor-check \
         docker-build docker-build-app docker-build-nginx \
         compose-up compose-down compose-logs \
@@ -77,6 +77,12 @@ test: ## 単体テスト
 
 test-integration: ## 統合テスト (testcontainers-go)
 	$(GO) test -race -count=1 -tags=integration ./tests/integration/...
+
+e2e-install: ## Playwright 依存（初回のみ）。Node.js 20+ 必須
+	cd tests/e2e && npm install && npx playwright install chromium
+
+test-e2e: ## Playwright E2E 実行。事前に make compose-up && make db-migrate を実行しておくこと
+	cd tests/e2e && npm test
 
 fmt: ## go fmt
 	$(GO) fmt ./...

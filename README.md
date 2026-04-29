@@ -1,6 +1,6 @@
 # sync-files-go
 
-個人専用オンラインファイル同期システム。バックエンドは **Go（標準ライブラリ中心）**、フロントエンドは **HTMX**、ストレージは **AWS S3 Files（NFS マウント）**、メタデータは **RDS for PostgreSQL**、デプロイは **Docker + Terraform + ECR + ECS Fargate**。
+個人専用オンラインファイル同期システム。バックエンドは **Go（標準ライブラリ中心）**、フロントエンドは **HTMX**、ストレージは **AWS S3 Files（NFS マウント）**、メタデータは **RDS for MySQL（Primary + Read Replica、DBRouter で読み書き分離）**、デプロイは **Docker + Terraform + ECR + ECS Fargate**、外部公開は **Cloudflare Tunnel + サイドカー nginx**（ALB は不採用）。
 
 ## ステータス
 

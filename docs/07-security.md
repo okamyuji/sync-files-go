@@ -10,22 +10,23 @@
 | **T**ampering | ファイル本体・メタデータの改ざん | TLS / AES-GCM 認証タグ / SHA-256 / 監査ログ | §4 |
 | **R**epudiation | 自分の操作の否認 | 監査ログ INSERT-only | §6 |
 | **I**nformation Disclosure | 認証情報・ファイル流出 | TLS 1.3 / 保存時暗号化 / 最小権限 IAM | §3, §4, §5 |
-| **D**enial of Service | 攻撃者によるサービス不能 | レート制限 / WAF（v2）/ ALB の保護 | §7 |
+| **D**enial of Service | 攻撃者によるサービス不能 | Cloudflare の DDoS 緩和 / nginx + アプリのレート制限 | §7 |
 | **E**levation of Privilege | 権限昇格 | アプリの権限分離 / IAM 最小権限 / DB ロール分離 | §5, §3 |
 
 ## 2. 攻撃面（Attack Surface）
 
 ```
 [外部から到達可能]
-   ├── ALB :443 (TLS)         ← TLS 1.3、ACM 証明書、ALB セキュリティポリシー
-   ├── /share/{id}            ← 公開リンク（未認証アクセス）
-   ├── /healthz, /readyz       ← ステータスエンドポイント (内部からのみアクセス可)
+   ├── Cloudflare Edge :443    ← TLS 1.3 終端、Cloudflare DDoS 緩和
+   │     └ Tunnel経由 → cloudflared (outbound接続のみ)
+   │       └ nginx :8443 (TLS 再終端) → app :8080
+   ├── /share/{id}             ← 公開リンク（未認証アクセス、Cloudflare 経由）
    └── (それ以外は認証必須)
 
 [内部 VPC 内のみ]
-   ├── ECS Fargate :8080      ← ALB からのみ受信
-   ├── RDS :5432              ← ECS タスクからのみ
-   ├── S3 Files (NFS)         ← VPC エンドポイント経由
+   ├── ECS Fargate :8080      ← nginx サイドカーからのみ（同一タスク localhost）
+   ├── RDS :3306              ← ECS タスクからのみ
+   ├── S3 Files (NFS :2049)   ← VPC エンドポイント経由
    └── Secrets Manager        ← VPC エンドポイント経由
 
 [管理面]
@@ -58,7 +59,7 @@
 
 | 項目 | 値 |
 |---|---|
-| 格納場所 | サーバ側 PostgreSQL `sessions` テーブル + Cookie |
+| 格納場所 | サーバ側 MySQL Primary `sessions` テーブル + Cookie |
 | Cookie 名 | `__Host-sync_session` |
 | Cookie 属性 | `HttpOnly; Secure; SameSite=Lax; Path=/` |
 | 値の構造 | `<session_id_uuid>.<HMAC-SHA256(server_key, session_id)>` |
@@ -114,6 +115,18 @@ v1 では「自分しか使わない」前提なので、Email リンクで安�
 
 ## 4. 暗号化（保存時 / 転送時）
 
+### 4.0 二段 TLS
+
+転送時暗号化は 2 段：
+
+- **ユーザブラウザ ↔ Cloudflare Edge**：TLS 1.3（Cloudflare 管理、Let's Encrypt 互換または Cloudflare Universal）
+- **Cloudflare ↔ cloudflared (ECS タスク内)**：Cloudflare Tunnel の暗号化トンネル（QUIC ベース）
+- **cloudflared ↔ nginx**：localhost ループバック内（同一タスク内）。自己署名 TLS で保護
+- **nginx ↔ app**：同上の localhost ループバック（HTTP）
+- **app ↔ RDS MySQL**：`tls=true` で TLS 必須
+- **app ↔ S3 Files (NFS)**：S3 Files の TLS 機能を有効化
+- **app ↔ Secrets Manager**：VPC エンドポイント経由 HTTPS
+
 ### 4.1 鍵階層
 
 ```
@@ -159,13 +172,9 @@ func encryptStream(plain io.Reader, dek [32]byte) (io.Reader, error) {
 
 S3 Files の裏側 EFS は AWS マネージド KMS で暗号化。アプリ層と合わせて多重防御。
 
-### 4.4 転送時暗号化
+### 4.4 転送時暗号化（再掲）
 
-- ALB: TLS 1.3 必須、TLS 1.2 は ALB セキュリティポリシー `ELBSecurityPolicy-TLS13-1-2-2021-06` で許容
-- ALB → ECS: ALB が TLS 終端、内部は HTTP（プライベートサブネット内）
-- ECS → RDS: TLS で接続（`sslmode=require`）
-- ECS → S3 Files: NFS over TLS（S3 Files の機能を有効化）
-- ECS → Secrets Manager: VPC エンドポイントで HTTPS
+§4.0 で扱った二段 TLS と内部経路の暗号化を実装する。MySQL 接続は go-sql-driver/mysql の `tls=true`（または `tls=preferred` で開発環境）。
 
 ## 5. 認可（Authorization）
 
@@ -174,11 +183,12 @@ S3 Files の裏側 EFS は AWS マネージド KMS で暗号化。アプリ層�
 - 本システムは個人専用なので、認可は「`files.owner_id == 認証ユーザの id` のみアクセス可」が基本
 - 公開リンク経由では `share_links` を通じた限定的アクセスのみ許可
 
-### 5.2 RDS の DB ロール
+### 5.2 RDS の DB ロール（MySQL）
 
-- アプリは `sync_app` ロールで接続
-- マイグレーションは `sync_migrate` ロールで接続（DDL のみ）
-- root ロールは AWS 経由でしか触らない（普段は使わない）
+- アプリは `'sync_app'@'%'` で接続。`SELECT/INSERT/UPDATE/DELETE` のみ。`audit_logs` は `INSERT/SELECT` のみ
+- マイグレーションは `'sync_migrate'@'%'` で接続（DDL のみ）
+- `rdsadmin` は AWS 経由でしか触らない（普段は使わない）
+- Read Replica は MySQL の `--read-only` モードで動作するため、誤って Reader ハンドルから書き込みが流れても DB 側で拒否される（保険）
 
 ### 5.3 IAM ロール
 
@@ -262,11 +272,11 @@ Cross-Origin-Embedder-Policy: require-corp
 
 実装：`rate_limit_buckets` テーブルに（key, tokens, refilled_at）を持つ。ECS タスク数が増えても DB を経由するため整合的。
 
-### 7.2 ALB のリクエスト制限
+### 7.2 nginx と Cloudflare のレート制限
 
-- ALB の同時接続上限を設定（v1 は AWS デフォルト）
-- `X-Forwarded-For` を利用して IP レート制限を実装
-- AWS Shield Standard はデフォルトで有効
+- Cloudflare 側：標準 DDoS 緩和 + Free プランでも基本のレート制限可
+- nginx 側：`limit_req_zone $http_cf_connecting_ip zone=ip:10m rate=300r/m;`（Cloudflare の `CF-Connecting-IP` ヘッダを真の IP として信頼）
+- アプリ側：DB 由来のトークンバケット（前述 §7.1）。3 層で防御
 
 ### 7.3 アップロードサイズ制限
 
@@ -283,18 +293,23 @@ Cross-Origin-Embedder-Policy: require-corp
   "sync-files-go/aes/master-key": "<32 bytes base64>",
   "sync-files-go/totp/hmac-key": "<32 bytes base64>",
   "sync-files-go/csrf/key": "<32 bytes base64>",
-  "sync-files-go/session/key": "<32 bytes base64>"
+  "sync-files-go/session/key": "<32 bytes base64>",
+  "sync-files-go/cloudflared/token": "<Cloudflare Tunnel auth token>"
 }
 ```
 
 - アプリは起動時に取得、メモリに保持
 - 鍵ローテーション手順は [`10-operations.md`](./10-operations.md) §7
 
-### 8.2 鍵ローテーション
+### 8.2 鍵ローテーション（一覧）
 
-- マスタ鍵: 6 ヶ月ごとに手動ローテーション
-- セッション署名鍵 / CSRF 鍵: 3 ヶ月ごと（古い鍵を 7 日間並行受け入れ）
-- DB パスワード: 12 ヶ月ごと
+| 鍵 | 周期 | 並行受入期間 |
+|---|---|---|
+| マスタ鍵（KEK 暗号化用） | 6 ヶ月 | KEK 再ラップ完了まで |
+| セッション署名鍵 / CSRF 鍵 | 3 ヶ月 | 7 日間並行 |
+| DB パスワード | 12 ヶ月 | 0（短時間ダウンを許容） |
+| Cloudflare Tunnel トークン | 12 ヶ月 / 異常時 | 即時切替 |
+| TOTP HMAC 鍵 | 12 ヶ月 | 旧鍵で復号 → 新鍵で再暗号化バッチ |
 
 ## 9. ログ・監査
 

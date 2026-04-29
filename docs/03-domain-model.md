@@ -541,10 +541,10 @@ Read Replica にはアプリ用の `sync_app` 同名・同 password でレプリ
     └── healthcheck.txt
 ```
 
-> **CR-1 修正の根拠**: 当初は `current/{file_uuid}` を可変キーとし、上書き時に `os.Rename` で切り替える設計だった。しかし「DB COMMIT 失敗 + S3 上のファイルは新版に書き換わり済み」という孤児が発生し、`files` レコードは存在するため孤児検出にも引っかからない致命的な不整合が起きた。本設計ではすべての版を `versions/{file_uuid}/{version_uuid}` という **immutable key** に書き、「現行版の指し示し」は **DB の `files.current_version_id_bin` 列だけ**で表現する。これにより：
+> **設計の根拠（immutable versions only）**: すべての版を `versions/{file_uuid}/{version_uuid}` という **immutable key** に書き、「現行版の指し示し」は **DB の `files.current_version_id_bin` 列だけ**で表現する。これにより：
 > - DB COMMIT が成功して初めて新版が「現行」になる
 > - DB COMMIT 失敗時、旧版の参照は変わらず、新版オブジェクトはどの DB 行からも参照されない無参照状態 → 補正ジョブで容易に検出可能（`versions/*/*` を走査し、どの `file_versions` 行からも参照されていないキーを `/_orphan/` へ移動）
-> - 「`current/{uuid}`」というキーは存在しない。ダウンロードは常に `SELECT current_version_id_bin FROM files` → `open(versions/{file_uuid}/{version_uuid})` の二段で行う
+> - 可変キー（同じパスへの上書き）は一切持たない。ダウンロードは常に `SELECT current_version_id_bin FROM files` → `open(versions/{file_uuid}/{version_uuid})` の二段で行う
 
 設計ポイント：
 
@@ -616,17 +616,17 @@ Read Replica にはアプリ用の `sync_app` 同名・同 password でレプリ
 
 ## 8.1 設計書中の SQL 表記の約束
 
-設計書（特に [`04-sync-semantics.md`](./04-sync-semantics.md) と [`05-file-operations-logic-tree.md`](./05-file-operations-logic-tree.md)）の SQL 例では、可読性のため次の **擬似 SQL 表記** を採る：
+設計書中の SQL 例は **MySQL 構文を正準** とし、プレースホルダは `?` で統一する：
 
-| 設計書での書き方 | 実装上の対応 |
+| 表記 | 意味 |
 |---|---|
-| `$1`, `$2` プレースホルダ | go-sql-driver/mysql は `?` を使う |
-| `owner_id`, `file_id` のような短い列名 | 実装は `owner_id_bin`, `file_id_bin`（BINARY(16)） |
-| `now()` | MySQL `NOW()` または `CURRENT_TIMESTAMP(6)` |
+| `?` | go-sql-driver/mysql のプレースホルダ。Go 側は `db.Exec(ctx, sql, args...)` で渡す |
+| `owner_id`, `file_id` のような短い列名 | 実装は `owner_id_bin`, `file_id_bin`（BINARY(16)）。短縮表記は文脈が明らかな疑似コードのみ |
+| `now()` / `NOW()` | MySQL の `NOW()` または `CURRENT_TIMESTAMP(6)` |
 | `INTERVAL 30 DAY` | MySQL 構文そのまま |
-| `FOR UPDATE` | MySQL の InnoDB ロック（同等） |
+| `FOR UPDATE` | InnoDB の行ロック |
 
-実装時はこの対応に従って読み替える。テンプレ的に書いた SQL を本物のクエリに変換するのはリポジトリ層の責務。
+旧設計初版の `$1` / `$2` プレースホルダ（PostgreSQL 風）は誤りで、すべて `?` に揃えること。リポジトリ層（`internal/repo/mysql/*.go`）が実 SQL を保持する。
 
 ## 9. 命名規則
 

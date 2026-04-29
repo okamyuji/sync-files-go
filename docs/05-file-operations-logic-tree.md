@@ -108,7 +108,7 @@
 [共通ガード] ← 失敗時 401/403/429
    │
    ▼
-SELECT files WHERE id = $1 AND owner_id = $2 AND state = 'active'
+SELECT files WHERE id = ? AND owner_id = ? AND state = 'active'
    ├── レコードなし → 404
    ├── state = 'trashed' → 410 Gone (UI: 「ゴミ箱にあります」リンク)
    ├── state = 'purged' or 'gone' → 410 Gone (復元不可)
@@ -132,26 +132,36 @@ SELECT files WHERE id = $1 AND owner_id = $2 AND state = 'active'
 
 ### 2.1 公開リンク経由のダウンロード
 
+token: base64url 32 bytes ランダム。サーバは受信値を SHA-256 してから DB の `token_hash` と照合する。
+
+**重要: アクセス可否判定とファイル本体取得はすべて Primary DB を使う**（ADR-008）。Replica 遅延中に取り消し済み・削除済みリンクが有効に見える事故を構造的に防ぐ。
+
 ```
-[GET /share/{token}]   (未認証、token は base64url 32 bytes ランダム、サーバ側で SHA-256(token) を share_links.token_hash と照合)
+[GET /share/{token}]   (未認証)
    │
    ▼
 [レート制限: IP 単位 30 req/min]
    │
    ▼
-SELECT * FROM share_links WHERE id = $1
+   token_hash := SHA-256(token from URL)
+   ▼
+   db := DBRouter.Writer(ctx)   ← Primary 強制（ADR-008、HIGH 修正）
+SELECT id_bin, file_id_bin, password_hash, expires_at, revoked_at
+  FROM share_links
+ WHERE token_hash = ?
+ LIMIT 1;
    ├── なし                          → 404
    ├── revoked_at IS NOT NULL        → 410 Gone
-   ├── expires_at < now()            → 410 Gone (UI に「期限切れ」)
+   ├── expires_at < NOW()            → 410 Gone (UI に「期限切れ」)
    ├── password_hash IS NOT NULL かつ未認証 → /share/{token}/password ページへ 302
    └── アクセス可 →
          │
          ▼
-   SELECT files WHERE id = (share_link.file_id)
-       ├── deleted_at IS NOT NULL → 410 Gone (auto-revoke 推奨)
-       └── active → §2 のダウンロード処理を流用
-                    + share_link_accesses への INSERT
-                    + view_count / download_count を増分
+   db で SELECT files WHERE id_bin = (share_link.file_id_bin)
+       ├── state != 'active' or deleted_at IS NOT NULL → 410 Gone (UPDATE share_links SET revoked_at で auto-revoke)
+       └── active → §2 のダウンロード処理を流用（同じく Primary）
+                    + share_link_accesses への INSERT (Primary、書き込みなので当然)
+                    + view_count / download_count を増分 (Primary)
 ```
 
 ## 3. リネーム / 移動
@@ -171,7 +181,7 @@ SELECT * FROM share_links WHERE id = $1
    └── 移動先に同名 active   → 409 Conflict (UI で別名 / 強制上書き 選択)
    │
    ▼
-SELECT files FOR UPDATE WHERE id = $1
+SELECT files FOR UPDATE WHERE id = ?
    ├── current_version_id != If-Match → 409 Conflict (rename も OCC)
    └── OK →
          BEGIN
@@ -195,7 +205,7 @@ S3 Files 上のキーは変更しない (UUID 固定)
 [UI 上の確認モーダル] ← INV-5 (これはフロント側の責務)
    │
    ▼
-SELECT files FOR UPDATE WHERE id = $1
+SELECT files FOR UPDATE WHERE id = ?
    ├── すでに trashed → 200 OK (冪等)
    ├── purged / gone   → 410 Gone
    └── active →
@@ -205,8 +215,8 @@ SELECT files FOR UPDATE WHERE id = $1
      UPDATE files SET state='trashed', deleted_at=now(), updated_at=now()
      -- 関連の active な share_link を auto-revoke
      UPDATE share_links SET revoked_at=now()
-       WHERE file_id=$1 AND revoked_at IS NULL
-     INSERT audit_logs (action='file.delete', target_id=$1)
+       WHERE file_id=? AND revoked_at IS NULL
+     INSERT audit_logs (action='file.delete', target_id=?)
    COMMIT
    │
    ▼
@@ -224,14 +234,14 @@ S3 Files 上のオブジェクトには手をつけない (INV-1)
    ▼
 WITH RECURSIVE
   descendants AS (
-    SELECT id FROM folders WHERE id = $1
+    SELECT id FROM folders WHERE id = ?
     UNION ALL
     SELECT f.id FROM folders f JOIN descendants d ON f.parent_folder_id = d.id
   )
 UPDATE folders SET deleted_at=now() WHERE id IN (SELECT id FROM descendants);
 UPDATE files   SET state='trashed', deleted_at=now()
   WHERE parent_folder_id IN (SELECT id FROM descendants) AND state='active';
-INSERT audit_logs (action='folder.delete', target_id=$1, details_json=...);
+INSERT audit_logs (action='folder.delete', target_id=?, details_json=...);
 ```
 
 サブツリー全体のサイズが大きい場合（>1000 ファイル）は、バックグラウンドジョブに委譲し、UI には「処理中」を表示する（v2 候補）。v1 では同期処理。
@@ -245,7 +255,7 @@ INSERT audit_logs (action='folder.delete', target_id=$1, details_json=...);
 [共通ガード]
    │
    ▼
-SELECT files FOR UPDATE WHERE id = $1
+SELECT files FOR UPDATE WHERE id = ?
    ├── すでに active → 200 OK (冪等)
    ├── purged / gone → 410 Gone
    └── trashed →
@@ -272,14 +282,14 @@ SELECT files FOR UPDATE WHERE id = $1
 [UI 確認モーダル: 「この操作は元に戻せません」 + パスワード再入力]   ← INV-5
    │
    ▼
-SELECT files FOR UPDATE WHERE id = $1
+SELECT files FOR UPDATE WHERE id = ?
    ├── state != 'trashed' → 400 (ゴミ箱にないものは purge できない)
    └── trashed →
          │
          ▼
-   for each fv in file_versions WHERE file_id_bin = $1:
+   for each fv in file_versions WHERE file_id_bin = ?:
      os.Remove(/var/data/owner-X/versions/{file_uuid}/{fv.id_bin})  -- S3 DeleteMarker 付与
-   UPDATE files SET state='purged', updated_at=NOW(6) WHERE id_bin=$1
+   UPDATE files SET state='purged', updated_at=NOW(6) WHERE id_bin=?
    INSERT audit_logs (action='file.purge', irreversible=true)
 ```
 
@@ -371,23 +381,30 @@ DELETE fv FROM file_versions fv
 [共通ガード]
    │
    ▼
-SELECT files WHERE id=$1 AND state='active'
+db := DBRouter.Writer(ctx)   ← 書き込みフローなので当然 Primary
+SELECT files WHERE id_bin = ? AND state = 'active'
    └── なし → 404
    │
    ▼
-expires_at の妥当性検証
-   ├── 1 hour | 1 day | 7 days | none のいずれか
-   └── 任意の DateTime は受け付けない (列挙のみ)
+expires_at の妥当性検証 (HIGH 修正: v1 では「期限なし」を不採用)
+   ├── 1 hour | 1 day | 7 days のいずれか必須
+   └── 任意の DateTime や 期限なし は受け付けない
+   │
+   ▼
+token := base64url(rand.Read(32))   ← サーバ生成、レスポンスにのみ含めて DB には保管しない
+token_hash := SHA-256(token)
    │
    ▼
 password が指定されている場合 Argon2id でハッシュ
    │
    ▼
-INSERT INTO share_links (id_bin=UUID_TO_BIN(UUID()), file_id_bin, token_hash, expires_at, ...)
-INSERT audit_logs (action='share.create', target_id=share_link.id)
+INSERT INTO share_links
+       (id_bin, file_id_bin, token_hash, password_hash, expires_at, created_by_bin)
+VALUES (UUID_TO_BIN(UUID()), ?, ?, ?, NOW() + INTERVAL ? DAY, ?);
+INSERT INTO audit_logs (action='share.create', target_id_bin=share_link.id_bin, ...);
    │
    ▼
-return JSON: { "url": "https://example.com/share/{token}", ... }
+return JSON: { "url": "https://sync.example.com/share/" + token, "expires_at": ... }
 ```
 
 ### 8.1 共有リンクの取り消し
@@ -399,7 +416,7 @@ return JSON: { "url": "https://example.com/share/{token}", ... }
 [共通ガード]
    │
    ▼
-UPDATE share_links SET revoked_at=now() WHERE id=$1 AND created_by=session.user_id
+UPDATE share_links SET revoked_at=now() WHERE id=? AND created_by=session.user_id
 INSERT audit_logs (action='share.revoke')
 ```
 
@@ -448,7 +465,7 @@ return HTML 部分テンプレート (HTMX swap)
    ▼
 SELECT *
   FROM audit_logs
- WHERE actor_id = $1 OR target_id IN (SELECT id FROM files WHERE owner_id=$1)
+ WHERE actor_id = ? OR target_id IN (SELECT id FROM files WHERE owner_id=?)
  ORDER BY occurred_at DESC
  LIMIT 50 OFFSET ?;
    │

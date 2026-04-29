@@ -261,7 +261,7 @@ Content-Security-Policy:
 
 ### 6.3 SQLi
 
-- 100% パラメータ化クエリ（`database/sql` の `?` または `$1` プレースホルダ）
+- 100% パラメータ化クエリ（go-sql-driver/mysql の `?` プレースホルダ）
 - 文字列連結禁止
 - ORM は不採用なので、誤って動的 SQL を組まないようコードレビューで担保
 
@@ -292,7 +292,7 @@ Cross-Origin-Embedder-Policy: require-corp
 ```
 ルート別の制限:
 - /login                 : ユーザ単位 5 / 15min, IP 単位 30 / 15min
-- /password-reset        : ユーザ単位 5 / 5min
+- /recovery              : ユーザ単位 5 / 5min（リカバリコード入力。v1 は Email リセットなし）
 - /uploads/*             : ユーザ単位 100 / 1min
 - /files (一覧/検索)     : ユーザ単位 60 / 1min
 - /share/* (公開リンク)  : IP 単位 30 / 1min
@@ -385,13 +385,15 @@ Cross-Origin-Embedder-Policy: require-corp
 
 | 項目 | 設計 |
 |---|---|
-| URL | `/share/<UUID v4>` (推測困難) |
+| URL | `/share/<base64url token>` （token は 32 bytes ランダム = 256 ビットエントロピー） |
+| 内部 ID 分離 | URL の token と DB の `share_links.id_bin` は別物。DB は `token_hash = SHA-256(token)` を UNIQUE 索引で持ち、平文 token は保管しない |
+| 認可判定 | **必ず Primary DB で照合**（Replica 遅延中の取り消し漏れ事故を防ぐ。ADR-008） |
 | パスワード | Argon2id で保管、検証は定数時間比較 |
-| 期限 | 1h / 1d / 7d / なし。Long-lived（>7d）は推奨しない（UI で警告） |
-| アクセス制限 | IP 単位 30 req/min |
+| 期限 | **v1 では `expires_at NOT NULL` 必須**。1h / 1d / 7d のいずれか。「期限なし」は不採用 |
+| アクセス制限 | IP 単位 30 req/min（nginx + アプリの二段） |
 | ログ | `share_link_accesses` に IP/UA を記録（90 日保持） |
-| 取り消し | UI から即座に `revoked_at` 付与 |
-| 元ファイル削除時 | 自動的に `revoked_at` 付与 |
+| 取り消し | UI から即座に `revoked_at` 付与（Primary 書き込み） |
+| 元ファイル削除時 | 自動的に `revoked_at` 付与（同トランザクション） |
 | HSTS | 本サービス全体で有効 |
 
 ## 12. プライバシー・データ最小化

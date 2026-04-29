@@ -46,17 +46,17 @@ DELETE で S3 オブジェクトを `os.Remove`、メタデータを `DELETE FRO
 
 - DELETE 操作はメタデータの `deleted_at` 更新のみ。S3 オブジェクトには手をつけない
 - ゴミ箱 UI からの「個別物理削除」「ゴミ箱を空にする」は確認モーダル + パスワード再入力を要求
-- 日次バッチ（ECS Scheduled Task）が `deleted_at < now() - 30 days` を物理削除キューへ
-- 物理削除は `os.Remove` で S3 DeleteMarker 付与（バージョニング有効）
-- S3 ライフサイクルポリシーが 90 日後に旧版を完全消去
+- 日次バッチ（ECS Scheduled Task）が `deleted_at < now() - 30 days` の files を物理削除する
+- 物理削除は `os.Remove(versions/{file_uuid}/{version_uuid})` を全 file_versions について行い、S3 DeleteMarker を付与
+- S3 ライフサイクルは「DeleteMarker 配下の noncurrent」を 90 日で完全消去するためにのみ使用
 
-## v1 の保持期間ポリシー（CR-5 で明確化）
+## v1 の保持期間ポリシー
 
 | 対象 | 保持期間 (v1) | 仕組み |
 |---|---|---|
-| ゴミ箱（ソフト削除されたファイル） | 30 日 | アプリ層バッチ。30 日後に物理削除 |
-| ファイル本体の旧版（active のままだが上書きされた古いバージョン） | **90 日** | S3 バケットバージョニング + ライフサイクル `noncurrent_version_expiration: 90 days` |
-| 物理削除後の S3 旧版 | 90 日（上記と同じ） | 同ライフサイクル |
+| ゴミ箱（ソフト削除されたファイル） | 30 日 | アプリ層日次バッチ |
+| active のままだが上書きされた旧バージョン | **90 日** | **アプリ層日次バッチ `prune-old-versions`**（`05-file-operations-logic-tree.md §7.2`）。immutable key 設計により S3 lifecycle の `noncurrent_version_expiration` は機能しない |
+| 物理削除後の S3 オブジェクト（DeleteMarker 配下の noncurrent） | 90 日 | S3 ライフサイクル `noncurrent_version_expiration: 90 days`（DeleteMarker が付いた後の最後の掃除のみ） |
 | アクティビティログ | 90 日 | アプリ層 |
 
 「無期限保持」「永久保管」を v1 では **謳わない**。F-5.5 の通り、v2 で延長を検討。

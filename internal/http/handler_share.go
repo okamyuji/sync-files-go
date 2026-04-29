@@ -133,6 +133,12 @@ func revokeShareLinkHandler(d *Deps) http.HandlerFunc {
 			ActorID: &sess.UserID, ActorKind: mysql.ActorUser,
 			Action: "share.revoke", TargetKind: "share_link", TargetID: &id,
 		})
+		// HTMX 2.x は 204 では swap しないので、HX-Request を見て 200 を返し、
+		// hx-swap="outerHTML" の対象を空 body で削除させる。
+		if r.Header.Get("HX-Request") == "true" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

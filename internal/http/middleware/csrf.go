@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"encoding/base64"
@@ -33,7 +34,7 @@ const csrfMaxFormBytes int64 = 64 << 10
 func CSRF(signKey []byte) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ensureCSRFCookie(w, r, signKey)
+			r = ensureCSRFCookie(w, r, signKey)
 
 			if !isStateChanging(r.Method) {
 				next.ServeHTTP(w, r)
@@ -84,10 +85,15 @@ func isFormURLEncoded(ct string) bool {
 	return strings.TrimSpace(ct) == "application/x-www-form-urlencoded"
 }
 
+type ctxKeyCSRFToken struct{}
+
 // ensureCSRFCookie まだ Cookie が無ければランダム値を発行する（GET でテンプレ埋め込みできるように）。
-func ensureCSRFCookie(w http.ResponseWriter, r *http.Request, _ []byte) {
-	if _, err := r.Cookie(CSRFCookieName); err == nil {
-		return
+//
+// 新規発行時は context にも積み、後段ハンドラ／テンプレートが（受信 Cookie が空でも）
+// 同じ値で hidden _csrf を埋められるようにする。
+func ensureCSRFCookie(w http.ResponseWriter, r *http.Request, _ []byte) *http.Request {
+	if c, err := r.Cookie(CSRFCookieName); err == nil {
+		return r.WithContext(context.WithValue(r.Context(), ctxKeyCSRFToken{}, c.Value))
 	}
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
@@ -100,12 +106,20 @@ func ensureCSRFCookie(w http.ResponseWriter, r *http.Request, _ []byte) {
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
+	return r.WithContext(context.WithValue(r.Context(), ctxKeyCSRFToken{}, val))
 }
 
 // CSRFTokenForTemplate ハンドラ内で、テンプレートに埋める CSRF トークンを取り出す。
+//
+// 検索順:
+//  1. 受信 Cookie（既に発行済みのケース）
+//  2. context（このリクエスト中に新規発行されたケース）
 func CSRFTokenForTemplate(r *http.Request) string {
 	if c, err := r.Cookie(CSRFCookieName); err == nil {
 		return c.Value
+	}
+	if v, ok := r.Context().Value(ctxKeyCSRFToken{}).(string); ok {
+		return v
 	}
 	return ""
 }

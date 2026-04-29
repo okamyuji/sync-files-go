@@ -1,0 +1,16 @@
+{{- /* conflict_modal  OCC 競合時に app.js が中身を埋める。
+        各ページ（home / pages/files など）から呼び出して body 末尾近くに置く。 */ -}}
+{{- define "partials/conflict_modal" -}}
+<dialog id="conflict-modal" aria-labelledby="conflict-modal-title">
+  <div class="dialog-head" id="conflict-modal-title">バージョンの競合</div>
+  <div class="dialog-body" data-conflict-body>
+    <p>サーバ側のバージョンが先に進んでいます。</p>
+  </div>
+  <div class="dialog-foot">
+    <form method="dialog">
+      <button class="btn btn-ghost" type="submit">閉じる</button>
+    </form>
+    <button class="btn btn-primary" type="button" data-action="reload">最新を読み込む</button>
+  </div>
+</dialog>
+{{- end -}}

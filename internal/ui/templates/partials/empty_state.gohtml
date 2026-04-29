@@ -1,0 +1,9 @@
+{{- /* empty_state  汎用の空状態。dict "title" "..." "body" "..." を渡す。 */ -}}
+{{- define "partials/empty_state" -}}
+<div class="empty" role="status">
+  <div>
+    <p class="empty-title">{{ .title }}</p>
+    <p class="empty-body">{{ .body }}</p>
+  </div>
+</div>
+{{- end -}}

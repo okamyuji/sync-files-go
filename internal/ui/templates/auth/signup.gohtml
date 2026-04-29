@@ -1,0 +1,47 @@
+{{- define "content" -}}
+<main class="auth-shell">
+  <section class="auth-card" aria-labelledby="signup-title">
+    <h1 id="signup-title" class="auth-title">アカウント作成</h1>
+    <p class="auth-subtitle">v1 は個人利用を想定しています。1 アカウントのみ作成できます。</p>
+
+    {{- if and .Extra .Extra.Error }}
+      <div class="notif" data-kind="warn" role="alert" style="margin-bottom: var(--space-4)">
+        {{ .Extra.Error }}
+      </div>
+    {{- end }}
+
+    {{- if and .Extra .Extra.RecoveryCodes }}
+      <div class="notif" data-kind="success" role="status" style="margin-bottom: var(--space-4)">
+        作成しました。下記のリカバリコードを <strong>必ず保管</strong> してください。これは二度と表示されません。
+      </div>
+      <pre style="background: var(--color-surface-2); padding: var(--space-4); border-radius: var(--radius-md); font-family: var(--font-mono); font-size: var(--text-sm); white-space: pre-wrap; word-break: break-all;">
+{{- range .Extra.RecoveryCodes }}{{ . }}
+{{ end -}}
+      </pre>
+      <a class="btn btn-primary btn-block" href="/login" style="margin-top: var(--space-4)">ログインへ進む</a>
+    {{- else }}
+      <form method="post" action="/signup">
+        <input type="hidden" name="_csrf" value="{{ .CSRFToken }}" />
+
+        <div class="field">
+          <label class="field-label" for="email">メールアドレス</label>
+          <input class="input" id="email" type="email" name="email" autocomplete="email" required />
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="password">パスワード</label>
+          <input class="input" id="password" type="password" name="password"
+                 autocomplete="new-password" required minlength="8" />
+          <div class="field-hint">8 文字以上を推奨</div>
+        </div>
+
+        <button class="btn btn-primary btn-block" type="submit">アカウントを作成</button>
+      </form>
+
+      <div class="auth-foot">
+        既にアカウントをお持ちの場合は <a href="/login">サインイン</a>
+      </div>
+    {{- end }}
+  </section>
+</main>
+{{- end -}}

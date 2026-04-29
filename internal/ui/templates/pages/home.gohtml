@@ -1,0 +1,44 @@
+{{- /* home  プレースホルダ（ステージ B で本実装に置き換え）。 */ -}}
+{{- define "content" -}}
+<div class="app">
+  {{ template "partials/header" . }}
+  <div class="app-shell">
+    {{ template "partials/sidebar" . }}
+    <main class="app-main" id="main">
+      <header class="section-head">
+        <h1 class="section-title">ホーム</h1>
+        <p class="section-sub">アップロード済みのファイルが表示されます。</p>
+      </header>
+
+      {{- if and .Extra .Extra.Files }}
+        <table class="file-table" aria-label="ファイル一覧">
+          <thead>
+            <tr><th>名前</th><th>サイズ</th><th>更新日時</th><th class="file-actions">操作</th></tr>
+          </thead>
+          <tbody>
+            {{- range .Extra.Files }}
+              {{ template "partials/file_row" (dict "file" . "csrf" $.CSRFToken) }}
+            {{- end }}
+          </tbody>
+        </table>
+      {{- else }}
+        {{ template "partials/empty_state" (dict "title" "まだファイルがありません" "body" "右下のアップロードゾーンにファイルをドラッグ&ドロップするか、ボタンから選択してください。") }}
+      {{- end }}
+
+      <section class="upload-zone" data-upload-zone aria-label="ファイルアップロード">
+        <p class="upload-zone-title">ファイルをドラッグ&ドロップ</p>
+        <p class="upload-zone-hint">または下のボタンから選択</p>
+        <form method="post" enctype="multipart/form-data" action="/api/files"
+              data-progress="upload-progress" style="margin-top: var(--space-4)">
+          <input type="hidden" name="_csrf" value="{{ .CSRFToken }}" />
+          <input type="file" name="file" required aria-label="アップロードするファイル" />
+          <button class="btn btn-primary" type="submit" style="margin-left: var(--space-3)">アップロード</button>
+          <progress class="upload-progress" id="upload-progress" max="100" value="0" aria-label="アップロード進捗"></progress>
+        </form>
+      </section>
+
+      {{ template "partials/conflict_modal" . }}
+    </main>
+  </div>
+</div>
+{{- end -}}

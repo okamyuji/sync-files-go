@@ -1,0 +1,52 @@
+{{- define "partials/sidebar" -}}
+{{- $cur := .Path -}}
+<nav class="app-sidebar" aria-label="メインナビゲーション">
+  <div class="nav-section">
+    <div class="nav-section-title">ファイル</div>
+    <ul class="nav-list">
+      <li class="nav-item">
+        <a href="/" {{ if isCurrent $cur "/" }}aria-current="page"{{ end }}>
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
+          ホーム
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="/share-links" {{ if pathStartsWith $cur "/share-links" }}aria-current="page"{{ end }}>
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 13a5 5 0 0 1 7 0l3-3a5 5 0 0 0-7-7l-2 2"/><path d="M14 11a5 5 0 0 1-7 0l-3 3a5 5 0 0 0 7 7l2-2"/></svg>
+          共有リンク
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="/trash" {{ if pathStartsWith $cur "/trash" }}aria-current="page"{{ end }}>
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
+          ゴミ箱
+        </a>
+      </li>
+    </ul>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-section-title">記録</div>
+    <ul class="nav-list">
+      <li class="nav-item">
+        <a href="/activity" {{ if pathStartsWith $cur "/activity" }}aria-current="page"{{ end }}>
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>
+          アクティビティ
+        </a>
+      </li>
+    </ul>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-section-title">設定</div>
+    <ul class="nav-list">
+      <li class="nav-item">
+        <a href="/settings" {{ if pathStartsWith $cur "/settings" }}aria-current="page"{{ end }}>
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.3l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.3-1.3L13 3h-4l-.3 2.5a7 7 0 0 0-2.3 1.3l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 4 12c0 .4 0 .9.1 1.3l-2 1.5 2 3.4 2.3-1c.7.5 1.5 1 2.3 1.3L9 21h4l.3-2.5a7 7 0 0 0 2.3-1.3l2.3 1 2-3.4-2-1.5c.1-.4.1-.9.1-1.3z"/></svg>
+          設定
+        </a>
+      </li>
+    </ul>
+  </div>
+</nav>
+{{- end -}}

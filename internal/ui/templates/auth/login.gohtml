@@ -1,0 +1,42 @@
+{{- define "content" -}}
+<main class="auth-shell">
+  <section class="auth-card" aria-labelledby="login-title">
+    <h1 id="login-title" class="auth-title">サインイン</h1>
+    <p class="auth-subtitle">登録済みのメールアドレスとパスワードを入力してください。</p>
+
+    {{- if and .Extra .Extra.Error }}
+      <div class="notif" data-kind="warn" role="alert" style="margin-bottom: var(--space-4)">
+        {{ .Extra.Error }}
+      </div>
+    {{- end }}
+
+    <form method="post" action="/login">
+      <input type="hidden" name="_csrf" value="{{ .CSRFToken }}" />
+
+      <div class="field">
+        <label class="field-label" for="email">メールアドレス</label>
+        <input class="input" id="email" type="email" name="email" autocomplete="email"
+               required {{ if and .Extra .Extra.Email }}value="{{ .Extra.Email }}"{{ end }} />
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="password">パスワード</label>
+        <input class="input" id="password" type="password" name="password"
+               autocomplete="current-password" required minlength="8" />
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="totp">認証コード <span class="field-hint">(2FA を有効化済の場合)</span></label>
+        <input class="input" id="totp" type="text" name="totp" inputmode="numeric"
+               autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" />
+      </div>
+
+      <button class="btn btn-primary btn-block" type="submit">サインイン</button>
+    </form>
+
+    <div class="auth-foot">
+      初めての方は <a href="/signup">アカウントを作成</a>
+    </div>
+  </section>
+</main>
+{{- end -}}

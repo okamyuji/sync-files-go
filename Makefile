@@ -27,8 +27,14 @@ COMPOSE_FILE  := deploy/docker/docker-compose.yml
 STATICCHECK_VERSION    ?= 2025.1.1
 GOLANGCI_LINT_VERSION  ?= v1.62.0
 
+# UI ベンダー JS （サードパーティ JS のためリポジトリ未コミット、make ui-vendor で取得）
+HTMX_VERSION          ?= 2.0.4
+HTMX_SSE_VERSION      ?= 2.2.2
+HTMX_SHA256           ?= 64f81e5dee6e4b9d56d6a6bb710c47f4f5a39f9d63ccd64a99ad4c63b7e5d7e8
+UI_VENDOR_DIR         := internal/ui/static/js
+
 .PHONY: help build test test-integration lint fmt vet staticcheck golangci-lint \
-        tools tools-install tools-check \
+        tools tools-install tools-check ui-vendor ui-vendor-check \
         docker-build docker-build-app docker-build-nginx \
         compose-up compose-down compose-logs \
         db-migrate db-shell smoke-test clean
@@ -36,11 +42,35 @@ GOLANGCI_LINT_VERSION  ?= v1.62.0
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk -F'[: ]+##[ ]?' '{printf "  %-22s %s\n", $$1, $$2}'
 
-build: ## Go の本体バイナリをビルド
+build: ui-vendor-check ## Go の本体バイナリをビルド
 	mkdir -p dist
 	$(GO) build -trimpath -ldflags="-s -w" -o dist/sync-files-go ./cmd/server
 	$(GO) build -trimpath -ldflags="-s -w" -o dist/sync-files-batch ./cmd/batch || true
 	$(GO) build -trimpath -ldflags="-s -w" -o dist/sync-files-admin ./cmd/sync-files-admin || true
+
+ui-vendor: ## サードパーティ JS (HTMX + sse 拡張) を $(UI_VENDOR_DIR) に取得
+	mkdir -p $(UI_VENDOR_DIR)
+	@if [ ! -f "$(UI_VENDOR_DIR)/htmx.min.js" ]; then \
+		echo "[ui-vendor] downloading htmx.org@$(HTMX_VERSION)"; \
+		curl -fsSL -o $(UI_VENDOR_DIR)/htmx.min.js \
+			https://unpkg.com/htmx.org@$(HTMX_VERSION)/dist/htmx.min.js; \
+	fi
+	@if [ ! -f "$(UI_VENDOR_DIR)/htmx-ext-sse.js" ]; then \
+		echo "[ui-vendor] downloading htmx-ext-sse@$(HTMX_SSE_VERSION)"; \
+		curl -fsSL -o $(UI_VENDOR_DIR)/htmx-ext-sse.js \
+			https://unpkg.com/htmx-ext-sse@$(HTMX_SSE_VERSION)/sse.js; \
+	fi
+	@echo "[ui-vendor] sha256:"
+	@shasum -a 256 $(UI_VENDOR_DIR)/htmx.min.js $(UI_VENDOR_DIR)/htmx-ext-sse.js
+
+ui-vendor-check: ## ベンダー JS が存在することを確認（無ければ案内）
+	@for f in htmx.min.js htmx-ext-sse.js; do \
+		if [ ! -f "$(UI_VENDOR_DIR)/$$f" ]; then \
+			echo "✗ missing $(UI_VENDOR_DIR)/$$f. Run: make ui-vendor" >&2; \
+			exit 1; \
+		fi; \
+	done
+	@echo "[ui-vendor-check] ok"
 
 test: ## 単体テスト
 	$(GO) test -race -count=1 ./...

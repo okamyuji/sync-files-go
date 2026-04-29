@@ -1,0 +1,24 @@
+{{- define "partials/header" -}}
+<header class="app-header" role="banner">
+  <a class="app-brand" href="/" aria-label="sync-files-go ホームへ">
+    <svg class="app-brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/>
+    </svg>
+    <span>sync-files-go</span>
+  </a>
+
+  <form class="app-search" role="search" action="/search" method="get">
+    <label for="q" class="sr-only">ファイル検索</label>
+    <input id="q" class="input-search" type="search" name="q" placeholder="ファイルを検索..." autocomplete="off" />
+  </form>
+
+  <div class="app-header-actions">
+    {{- if .CurrentUser }}
+      <span class="badge" title="{{ .CurrentUser.Email }}">{{ .CurrentUser.Email }}</span>
+      <a class="btn btn-ghost btn-sm" href="/logout" data-logout>ログアウト</a>
+    {{- else }}
+      <a class="btn btn-secondary btn-sm" href="/login">ログイン</a>
+    {{- end }}
+  </div>
+</header>
+{{- end -}}

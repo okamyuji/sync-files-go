@@ -19,6 +19,18 @@ variable "db_instance_class" {
   default     = "db.t4g.micro"
 }
 
+variable "enable_performance_insights" {
+  description = "Performance Insights。db.t4g.micro は非対応のため dev では false 推奨"
+  type        = bool
+  default     = false
+}
+
+variable "create_replica" {
+  description = "Read Replica を作るか。manage_master_user_password=true と非互換のため、dev では false。prod で有効化する場合は master password を Secrets 直管理に変更する必要あり"
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   description = "共通タグ"
   type        = map(string)

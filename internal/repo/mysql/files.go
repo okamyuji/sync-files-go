@@ -78,6 +78,14 @@ func (r *FilesRepo) FindActiveByOwnerPath(ctx context.Context, tx *sql.Tx, owner
 	return scanFile(row)
 }
 
+// GetByOwnerPathActive 事前 OCC チェック用。FOR UPDATE しない短いクエリで Primary を読む。
+// 並列 INSERT の排他は active_marker UNIQUE で DB 層が守る（CR-2）。
+func (r *FilesRepo) GetByOwnerPathActive(ctx context.Context, ownerID uuid.UUID, path string) (*domain.File, error) {
+	q := `SELECT ` + fileColumns + ` FROM files WHERE owner_id_bin = ? AND path_hash = ? AND state = 'active' LIMIT 1`
+	row := r.router.Writer(ctx).QueryRowContext(ctx, q, uuidToBin(ownerID), PathHash(path))
+	return scanFile(row)
+}
+
 // ListActiveByOwner Replica 経由（通常時）。
 func (r *FilesRepo) ListActiveByOwner(ctx context.Context, ownerID uuid.UUID, limit, offset int) ([]*domain.File, error) {
 	q := `SELECT ` + fileColumns + `

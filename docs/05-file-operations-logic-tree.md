@@ -33,7 +33,8 @@
 ## 1. アップロード（CREATE / OVERWRITE）
 
 ```
-[POST or PUT /files/{path}]
+[POST /files            -- 新規 (X-File-Path ヘッダで path 指定、If-None-Match: *)
+ or PUT /files/{id}      -- 既存上書き (If-Match: <version_id>)]
         │
         ▼
 [共通ガード]  ← 失敗時 401/403/429
@@ -74,7 +75,7 @@
    ├── tmp/{upload_uuid}.part にストリーム書き込み
    │     ├── サイズ超過 (> 2GB) → 413 Payload Too Large
    │     ├── ディスク満杯       → 507 Insufficient Storage
-   │     └── 通信切断           → tmp は残置 (7日 TTL で掃除)
+   │     └── 通信切断           → tmp は残置 (7 日 TTL で掃除)
    ├── SHA-256 を計算しながら書き込み (ストリーム)
    ├── ファイル末尾で AES-GCM の認証タグを検証
    ├── fsync (best-effort)
@@ -127,7 +128,7 @@ SELECT files WHERE id = $1 AND owner_id = $2 AND state = 'active'
 ### 2.1 公開リンク経由のダウンロード
 
 ```
-[GET /share/{share_link_id}]   (未認証)
+[GET /share/{id}]   (未認証、id は ShareLink.id)
    │
    ▼
 [レート制限: IP 単位 30 req/min]
@@ -285,7 +286,7 @@ SELECT files FOR UPDATE WHERE id = $1
 SELECT id, owner_id, storage_key
   FROM files
  WHERE state = 'trashed'
-   AND deleted_at < now() - INTERVAL '30 days'
+   AND deleted_at < NOW() - INTERVAL 30 DAY
  ORDER BY deleted_at ASC
  LIMIT 1000;
    │

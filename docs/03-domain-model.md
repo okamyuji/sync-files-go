@@ -537,6 +537,20 @@ Read Replica にはアプリ用の `sync_app` 同名・同 password でレプリ
 | INV-4 未完了は本番に反映しない | `state = 'draft'` 状態を経由。`upload_sessions` が COMMIT 後にのみ `files` を更新 |
 | INV-5 破壊的操作の確認 | UI 側 + サーバ側の二段確認 |
 
+## 8.1 設計書中の SQL 表記の約束
+
+設計書（特に [`04-sync-semantics.md`](./04-sync-semantics.md) と [`05-file-operations-logic-tree.md`](./05-file-operations-logic-tree.md)）の SQL 例では、可読性のため次の **擬似 SQL 表記** を採る：
+
+| 設計書での書き方 | 実装上の対応 |
+|---|---|
+| `$1`, `$2` プレースホルダ | go-sql-driver/mysql は `?` を使う |
+| `owner_id`, `file_id` のような短い列名 | 実装は `owner_id_bin`, `file_id_bin`（BINARY(16)） |
+| `now()` | MySQL `NOW()` または `CURRENT_TIMESTAMP(6)` |
+| `INTERVAL 30 DAY` | MySQL 構文そのまま |
+| `FOR UPDATE` | MySQL の InnoDB ロック（同等） |
+
+実装時はこの対応に従って読み替える。テンプレ的に書いた SQL を本物のクエリに変換するのはリポジトリ層の責務。
+
 ## 9. 命名規則
 
 - テーブル名は複数形 snake_case (`files`, `file_versions`)

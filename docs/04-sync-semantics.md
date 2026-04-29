@@ -139,7 +139,7 @@ HX-Trigger: openConflictModal
   "options": [
     { "id": "view_server",      "label": "サーバ版を確認",                "method": "GET",  "url": "/files/8a3f..." },
     { "id": "save_as_copy",     "label": "別名で保存",                     "method": "POST", "url": "/files/8a3f.../save-as-copy" },
-    { "id": "force_overwrite",  "label": "上書き（旧版は30日復元可）",     "method": "PUT",  "url": "/files/8a3f...", "headers": { "If-Match": "*" }, "warn": true },
+    { "id": "force_overwrite",  "label": "上書き（旧版は30 日復元可）",     "method": "PUT",  "url": "/files/8a3f...", "headers": { "If-Match": "*" }, "warn": true },
     { "id": "cancel",           "label": "キャンセル" }
   ]
 }
@@ -244,7 +244,7 @@ ECS Scheduled Task が日次で次を実行：
 SELECT id, owner_id, storage_key
   FROM files
  WHERE state = 'trashed'
-   AND deleted_at < now() - INTERVAL '30 days'
+   AND deleted_at < NOW() - INTERVAL 30 DAY
  ORDER BY deleted_at ASC
  LIMIT 1000;
 

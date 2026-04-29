@@ -45,6 +45,80 @@ func NewAuditRepo(router *repo.DBRouter) *AuditRepo {
 	return &AuditRepo{router: router}
 }
 
+// ListByActor アクティビティ画面用。指定ユーザの audit_logs を新しい順に取り出す。
+//
+// idx_audit_logs_actor_time (actor_id_bin, occurred_at DESC) があるので O(log n) で最新が引ける。
+func (r *AuditRepo) ListByActor(ctx context.Context, actorID uuid.UUID, limit, offset int) ([]*AuditEntry, error) {
+	const q = `
+SELECT id_bin, occurred_at, actor_id_bin, actor_kind, action,
+       target_kind, target_id_bin, details_json, ip_addr, user_agent, irreversible
+FROM audit_logs
+WHERE actor_id_bin = ?
+ORDER BY occurred_at DESC
+LIMIT ? OFFSET ?
+`
+	rows, err := r.router.Reader(ctx).QueryContext(ctx, q, uuidToBin(actorID), limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]*AuditEntry, 0)
+	for rows.Next() {
+		e, err := scanAuditEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// scanAuditEntry rows.Next() 後の現在行を AuditEntry に展開する。
+func scanAuditEntry(rows *sql.Rows) (*AuditEntry, error) {
+	var (
+		e          AuditEntry
+		idBin      []byte
+		actorBin   sql.RawBytes
+		targetBin  sql.RawBytes
+		details    []byte
+		ipAddr     sql.RawBytes
+		userAgent  sql.NullString
+		actorKind  string
+		targetKind string
+	)
+	if err := rows.Scan(
+		&idBin, &e.OccurredAt, &actorBin, &actorKind, &e.Action,
+		&targetKind, &targetBin, &details, &ipAddr, &userAgent, &e.Irreversible,
+	); err != nil {
+		return nil, err
+	}
+	e.ID, _ = binToUUID(idBin)
+	e.ActorKind = ActorKind(actorKind)
+	e.TargetKind = targetKind
+	if len(actorBin) > 0 {
+		id, _ := binToUUID(actorBin)
+		e.ActorID = &id
+	}
+	if len(targetBin) > 0 {
+		id, _ := binToUUID(targetBin)
+		e.TargetID = &id
+	}
+	if len(details) > 0 {
+		var m map[string]any
+		if err := json.Unmarshal(details, &m); err == nil {
+			e.Details = m
+		}
+	}
+	if len(ipAddr) > 0 {
+		e.IPAddr = append([]byte(nil), ipAddr...)
+	}
+	if userAgent.Valid {
+		e.UserAgent = userAgent.String
+	}
+	return &e, nil
+}
+
 // Insert 監査ログを 1 行追加する。トランザクション内なら *sql.Tx を渡す（オプション）。
 func (r *AuditRepo) Insert(ctx context.Context, tx *sql.Tx, e *AuditEntry) error {
 	if e.ID == uuid.Nil {

@@ -79,12 +79,25 @@ func NewServer(d *Deps) http.Handler {
 	mux.Handle("POST /api/files/{id}/restore", authMW(restoreFileHandler(d)))
 	mux.Handle("POST /api/files/{id}/save-as-copy", authMW(saveAsCopyHandler(d)))
 
+	// 認証必須の HTML ページ
+	if d.UI != nil {
+		mux.Handle("GET /trash", authMW(trashPageHandler(d)))
+		mux.Handle("GET /share-links", authMW(shareLinksPageHandler(d)))
+		mux.Handle("GET /activity", authMW(activityPageHandler(d)))
+		mux.Handle("GET /settings", authMW(settingsPageHandler(d)))
+	}
+
 	// 公開リンク（認証必須側）
 	mux.Handle("POST /api/files/{id}/share-links", authMW(createShareLinkHandler(d)))
 	mux.Handle("DELETE /api/share-links/{id}", authMW(revokeShareLinkHandler(d)))
 
-	// 公開リンク（未認証側）。ShareLinksRepo が Primary を読むので RAW window 不要。
-	mux.HandleFunc("GET /share/{token}", publicShareDownloadHandler(d))
+	// 公開リンク（未認証側）。HTML 要求時は sharePageHandler、それ以外は直接ダウンロード。
+	if d.UI != nil {
+		mux.HandleFunc("GET /share/{token}", sharePageHandler(d))
+	} else {
+		mux.HandleFunc("GET /share/{token}", publicShareDownloadHandler(d))
+	}
+	mux.HandleFunc("GET /share/{token}/download", publicShareDownloadHandler(d))
 
 	// 共通ミドルウェア (chain)
 	chain := middleware.Chain(mux,

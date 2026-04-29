@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1.7
+#
+# sync-files-go アプリケーションコンテナ
+#
+# - ビルド: golang:1.23-bookworm
+# - 実行: gcr.io/distroless/static-debian12:nonroot
+# - arm64 / static binary / read-only root filesystem 想定
+#
+# /var/data は ECS タスクの volume mount で attach される (S3 Files NFS)。
+
+FROM golang:1.23-bookworm AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=arm64
+
+RUN go build -tags=netgo,osusergo \
+    -ldflags="-s -w -buildid=" \
+    -trimpath \
+    -o /out/sync-files-go \
+    ./cmd/server
+
+# templates / static (Phase 4 以降で実体が増えていく)
+RUN mkdir -p /out/templates /out/static \
+    && cp -r internal/ui/templates /out/templates 2>/dev/null || true \
+    && cp -r internal/ui/static    /out/static    2>/dev/null || true
+
+# ----- Runtime -----
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/sync-files-go /sync-files-go
+COPY --from=build /out/templates /templates
+COPY --from=build /out/static    /static
+
+ENV PORT=8080 \
+    DATA_DIR=/var/data \
+    APP_ENV=prod
+
+EXPOSE 8080
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/sync-files-go"]

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -18,7 +19,7 @@ func TestLoad_RequiresKeys(t *testing.T) {
 // TestLoad_DecodesKeys base64 エンコードされた鍵が復号されることを確認する。
 func TestLoad_DecodesKeys(t *testing.T) {
 	// 32 bytes 以上の鍵（base64）
-	const k = "REDACTED_LOCAL_KEY"
+	k := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32)))
 
 	t.Setenv("APP_ENV", "local")
 	t.Setenv("AES_MASTER_KEY", k)

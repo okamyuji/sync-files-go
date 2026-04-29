@@ -127,12 +127,13 @@ func startSharedMySQL(t *testing.T) string {
 		defer cancel()
 
 		t.Log("[testcontainers] mysql:8.0 起動中... (60-120 秒かかる場合があります)")
+		localPassword := "test-" + uuid.NewString()
 		container, err := tcmysql.Run(ctx, "mysql:8.0",
 			tcmysql.WithDatabase("sync"),
 			tcmysql.WithUsername("sync_app"),
-			tcmysql.WithPassword("redacted"),
+			tcmysql.WithPassword(localPassword),
 			testcontainers.WithEnv(map[string]string{
-				"MYSQL_ROOT_PASSWORD": "redacted",
+				"MYSQL_ROOT_PASSWORD": localPassword,
 			}),
 		)
 		if err != nil {

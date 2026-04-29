@@ -22,6 +22,7 @@ GO            ?= go
 TAG           ?= dev
 BASE_URL      ?= http://localhost:8080
 COMPOSE_FILE  := deploy/docker/docker-compose.yml
+COMPOSE_ENV_FILE ?= deploy/docker/.env
 
 # 品質ゲート用ツールのバージョン（reproducible に固定）
 STATICCHECK_VERSION    ?= 2025.1.1
@@ -131,23 +132,27 @@ docker-build-nginx:
 		--load .
 
 compose-up: ## ローカル一式起動
-	docker compose -f $(COMPOSE_FILE) up -d --build
+	@test -f $(COMPOSE_ENV_FILE) || { echo "missing $(COMPOSE_ENV_FILE). Copy deploy/docker/.env.example and fill local values."; exit 2; }
+	docker compose --env-file $(COMPOSE_ENV_FILE) -f $(COMPOSE_FILE) up -d --build
 	@echo "→ Logs:        make compose-logs"
 	@echo "→ Smoke test:  make smoke-test"
 	@echo "→ Web UI:      http://localhost:8080  (nginx 経由は https://localhost:8443)"
 
 compose-down: ## 停止
-	docker compose -f $(COMPOSE_FILE) down -v
+	docker compose --env-file $(COMPOSE_ENV_FILE) -f $(COMPOSE_FILE) down -v
 
 compose-logs:
-	docker compose -f $(COMPOSE_FILE) logs -f --tail=200
+	docker compose --env-file $(COMPOSE_ENV_FILE) -f $(COMPOSE_FILE) logs -f --tail=200
 
 db-migrate: ## migrations/ を MySQL コンテナに適用
-	docker compose -f $(COMPOSE_FILE) exec -T mysql mysql \
-		-uroot -p"$$MYSQL_ROOT_PASSWORD" sync < <(cat migrations/*.sql)
+	@test -f $(COMPOSE_ENV_FILE) || { echo "missing $(COMPOSE_ENV_FILE). Copy deploy/docker/.env.example and fill local values."; exit 2; }
+	docker compose --env-file $(COMPOSE_ENV_FILE) -f $(COMPOSE_FILE) exec -T mysql \
+		sh -c 'mysql -uroot -p"$$MYSQL_ROOT_PASSWORD" sync' < <(cat migrations/*.sql)
 
 db-shell: ## ローカル MySQL に CLI 接続
-	docker compose -f $(COMPOSE_FILE) exec mysql mysql -usync_app -p"$$MYSQL_PASSWORD" sync
+	@test -f $(COMPOSE_ENV_FILE) || { echo "missing $(COMPOSE_ENV_FILE). Copy deploy/docker/.env.example and fill local values."; exit 2; }
+	docker compose --env-file $(COMPOSE_ENV_FILE) -f $(COMPOSE_FILE) exec mysql \
+		sh -c 'mysql -usync_app -p"$$MYSQL_PASSWORD" sync'
 
 smoke-test: ## healthz へ疎通
 	@curl -fsSL $(BASE_URL)/healthz && echo " OK"

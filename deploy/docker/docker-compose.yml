@@ -10,8 +10,8 @@ services:
     environment:
       MYSQL_DATABASE: sync
       MYSQL_USER: sync_app
-      MYSQL_PASSWORD: ${SYNC_FILES_MYSQL_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${SYNC_FILES_MYSQL_ROOT_PASSWORD}
+      MYSQL_PASSWORD: ${SYNC_FILES_MYSQL_PASSWORD:?copy deploy/docker/.env.example to deploy/docker/.env and set SYNC_FILES_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${SYNC_FILES_MYSQL_ROOT_PASSWORD:?copy deploy/docker/.env.example to deploy/docker/.env and set SYNC_FILES_MYSQL_ROOT_PASSWORD}
     command:
       - --default-authentication-plugin=mysql_native_password
       - --binlog-format=ROW
@@ -23,7 +23,7 @@ services:
       - mysqldata:/var/lib/mysql
       - ../../migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p"$$MYSQL_ROOT_PASSWORD""]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\""]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -45,17 +45,17 @@ services:
       DB_PORT: "3306"
       DB_NAME: sync
       DB_USER: sync_app
-      DB_PASSWORD: ${SYNC_FILES_MYSQL_PASSWORD}
+      DB_PASSWORD: ${SYNC_FILES_MYSQL_PASSWORD:?copy deploy/docker/.env.example to deploy/docker/.env and set SYNC_FILES_MYSQL_PASSWORD}
       DB_TLS: preferred
       LOG_LEVEL: debug
       MAX_UPLOAD_BYTES: "2147483648"
       READ_AFTER_WRITE_WINDOW_SECONDS: "5"
       REPLICA_LAG_DEGRADE_SECONDS: "10"
-      # 開発用ダミー鍵（本番は Secrets Manager から）。base64 32 bytes。
-      AES_MASTER_KEY: "REDACTED_LOCAL_KEY"
-      TOTP_HMAC_KEY:  "REDACTED_LOCAL_KEY"
-      CSRF_KEY:       "REDACTED_LOCAL_KEY"
-      SESSION_KEY:    "REDACTED_LOCAL_KEY"
+      # 開発用の値は deploy/docker/.env に置く。本番は Secrets Manager から注入する。
+      AES_MASTER_KEY: ${SYNC_FILES_AES_MASTER_KEY:?copy deploy/docker/.env.example to deploy/docker/.env and set SYNC_FILES_AES_MASTER_KEY}
+      TOTP_HMAC_KEY:  ${SYNC_FILES_TOTP_HMAC_KEY:?copy deploy/docker/.env.example to deploy/docker/.env and set SYNC_FILES_TOTP_HMAC_KEY}
+      CSRF_KEY:       ${SYNC_FILES_CSRF_KEY:?copy deploy/docker/.env.example to deploy/docker/.env and set SYNC_FILES_CSRF_KEY}
+      SESSION_KEY:    ${SYNC_FILES_SESSION_KEY:?copy deploy/docker/.env.example to deploy/docker/.env and set SYNC_FILES_SESSION_KEY}
       BASE_URL: http://localhost:8080
     ports:
       - "8080:8080"

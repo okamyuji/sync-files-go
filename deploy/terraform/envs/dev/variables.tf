@@ -1,40 +1,40 @@
 variable "aws_region" {
-  description = "AWS リージョン"
+  type    = string
+  default = "ap-northeast-1"
+}
+
+variable "aws_profile" {
+  description = "AWS CLI プロファイル名"
   type        = string
-  default     = "ap-northeast-1"
+  default     = "sync-admin"
+}
+
+variable "instance_type" {
+  type    = string
+  default = "t4g.small"
 }
 
 variable "db_instance_class" {
-  description = "RDS インスタンスクラス (dev は最小)"
-  type        = string
-  default     = "db.t4g.micro"
+  type    = string
+  default = "db.t4g.micro"
 }
 
-variable "image_tag" {
-  description = "ECR にプッシュ済みのイメージタグ。CI から `<git-sha>-<ts>` で渡す"
+variable "domain_name" {
+  description = "公開ドメイン名。EIP に A レコードを向ける"
+  type        = string
+}
+
+variable "letsencrypt_email" {
+  description = "Let's Encrypt 通知メール"
   type        = string
 }
 
 variable "base_url" {
-  description = "外部公開ベース URL"
+  description = "BASE_URL (https://<domain_name>)"
   type        = string
-  default     = "https://sync-dev.example.com"
 }
 
 variable "alert_emails" {
-  description = "SNS alerts subscribers (subscription confirmation 必須)"
-  type        = list(string)
-  default     = []
-}
-
-variable "efs_file_system_id" {
-  description = "EFS ファイルシステム ID。setup-s3files.sh で作成して値を渡す"
-  type        = string
-  default     = ""
-}
-
-variable "efs_access_point_id" {
-  description = "EFS アクセスポイント ID"
-  type        = string
-  default     = ""
+  type    = list(string)
+  default = []
 }

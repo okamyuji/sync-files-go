@@ -1,23 +1,23 @@
-# dev 環境のサンプル tfvars。
+# dev 環境のサンプル tfvars
 #
 # 使い方:
 #   cp terraform.tfvars.example terraform.tfvars
 #   terraform init
 #   terraform apply
 
-aws_region = "ap-northeast-1"
+aws_region  = "ap-northeast-1"
+aws_profile = "sync-admin"
 
-# CI/CD から都度渡す前提なので、デフォルト値は意図的に置かない
-image_tag = "PUT-GIT-SHA-HERE"
+instance_type     = "t4g.small"
+db_instance_class = "db.t4g.micro"
 
-base_url = "https://sync-dev.example.com"
+# 公開ドメイン名 (例: sync-dev.example.com)
+domain_name = "sync-dev.example.com"
+base_url    = "https://sync-dev.example.com"
+
+# Let's Encrypt 通知用
+letsencrypt_email = "ops@example.com"
 
 alert_emails = [
   "ops@example.com",
 ]
-
-# setup-s3files.sh dev を先に実行してから値を入れる
-efs_file_system_id  = ""
-efs_access_point_id = ""
-
-db_instance_class = "db.t4g.micro"

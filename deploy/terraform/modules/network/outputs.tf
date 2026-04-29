@@ -3,29 +3,24 @@ output "vpc_id" {
   value       = aws_vpc.main.id
 }
 
-output "public_subnet_ids" {
-  description = "Public サブネット ID（ECS Fargate タスクが配置される）"
-  value       = [for s in aws_subnet.public : s.id]
+output "public_subnet_id" {
+  description = "EC2 を配置する Public サブネット ID"
+  value       = aws_subnet.public.id
 }
 
 output "private_subnet_ids" {
-  description = "Private サブネット ID（RDS が配置される）"
+  description = "RDS を配置する Private サブネット ID"
   value       = [for s in aws_subnet.private : s.id]
 }
 
-output "ecs_security_group_id" {
-  description = "ECS Fargate タスク SG"
-  value       = aws_security_group.ecs.id
+output "ec2_security_group_id" {
+  description = "EC2 SG"
+  value       = aws_security_group.ec2.id
 }
 
 output "rds_security_group_id" {
   description = "RDS SG"
   value       = aws_security_group.rds.id
-}
-
-output "vpce_security_group_id" {
-  description = "VPC endpoint SG"
-  value       = aws_security_group.vpce.id
 }
 
 output "azs" {

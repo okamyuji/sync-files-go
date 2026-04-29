@@ -38,7 +38,8 @@ UI_VENDOR_DIR         := internal/ui/static/js
         docker-build docker-build-app docker-build-nginx \
         compose-up compose-down compose-logs \
         db-migrate db-shell smoke-test clean \
-        tf-fmt tf-validate tf-plan-dev tf-plan-prod release-smoke release-critical-path
+        tf-fmt tf-validate tf-plan-dev tf-plan-prod release-smoke release-critical-path \
+        deploy-build deploy ssm-shell
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk -F'[: ]+##[ ]?' '{printf "  %-22s %s\n", $$1, $$2}'
@@ -167,6 +168,57 @@ tf-plan-dev: ## dev 環境 plan (要 backend S3 + AWS credentials)
 
 tf-plan-prod: ## prod 環境 plan (要 backend S3 + AWS credentials、apply は人間承認)
 	cd deploy/terraform/envs/prod && terraform init && terraform plan -var-file=terraform.tfvars
+
+# ===== EC2 デプロイ =====
+#
+# 使い方:
+#   make deploy ENV=dev   # dev 環境の EC2 にバイナリを SCP + systemctl restart
+#
+# AWS CLI と SSM Session Manager Plugin が必要。SSH ポートは閉じているので SSM 経由で push する。
+
+ENV ?= dev
+SYNC_BIN_DIR := dist/linux-arm64
+
+deploy-build: ## arm64 Linux 向け 3 バイナリを cross-compile
+	mkdir -p $(SYNC_BIN_DIR)
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w -buildid=" \
+		-o $(SYNC_BIN_DIR)/sync-files-go ./cmd/server
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w -buildid=" \
+		-o $(SYNC_BIN_DIR)/sync-files-batch ./cmd/batch
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w -buildid=" \
+		-o $(SYNC_BIN_DIR)/sync-files-admin ./cmd/sync-files-admin
+	@echo "[deploy-build] $(SYNC_BIN_DIR)/sync-files-{go,batch,admin}"
+
+deploy: deploy-build ## EC2 にバイナリを送って restart (要 ENV と aws_profile, ssm セッションマネージャプラグイン)
+	$(eval INSTANCE_ID := $(shell cd deploy/terraform/envs/$(ENV) && terraform output -raw ec2_instance_id))
+	@echo "[deploy] target=$(INSTANCE_ID)"
+	# SSM の send-command でバイナリを base64 で流し込む
+	# 大きいので S3 経由が現実的: バックアップバケットを使う
+	$(eval BUCKET := $(shell cd deploy/terraform/envs/$(ENV) && terraform output -raw s3_backup_bucket))
+	$(eval STAMP := $(shell date +%Y%m%d%H%M))
+	aws --profile sync-admin s3 cp $(SYNC_BIN_DIR)/sync-files-go    s3://$(BUCKET)/deploy/$(STAMP)/sync-files-go
+	aws --profile sync-admin s3 cp $(SYNC_BIN_DIR)/sync-files-batch s3://$(BUCKET)/deploy/$(STAMP)/sync-files-batch
+	aws --profile sync-admin s3 cp $(SYNC_BIN_DIR)/sync-files-admin s3://$(BUCKET)/deploy/$(STAMP)/sync-files-admin
+	aws --profile sync-admin ssm send-command --instance-ids $(INSTANCE_ID) \
+		--document-name "AWS-RunShellScript" \
+		--comment "deploy sync-files-go $(STAMP)" \
+		--parameters 'commands=[' \
+		'"set -e",' \
+		'"aws s3 cp s3://$(BUCKET)/deploy/$(STAMP)/sync-files-go    /opt/sync-files-go/bin/sync-files-go.new",' \
+		'"aws s3 cp s3://$(BUCKET)/deploy/$(STAMP)/sync-files-batch /opt/sync-files-go/bin/sync-files-batch.new",' \
+		'"aws s3 cp s3://$(BUCKET)/deploy/$(STAMP)/sync-files-admin /opt/sync-files-go/bin/sync-files-admin.new",' \
+		'"chmod +x /opt/sync-files-go/bin/sync-files-*.new",' \
+		'"chown syncapp:syncapp /opt/sync-files-go/bin/sync-files-*.new",' \
+		'"mv /opt/sync-files-go/bin/sync-files-go.new    /opt/sync-files-go/bin/sync-files-go",' \
+		'"mv /opt/sync-files-go/bin/sync-files-batch.new /opt/sync-files-go/bin/sync-files-batch",' \
+		'"mv /opt/sync-files-go/bin/sync-files-admin.new /opt/sync-files-go/bin/sync-files-admin",' \
+		'"systemctl restart sync-files-go.service"' \
+		']'
+	@echo "[deploy] sent. follow with: aws ssm list-command-invocations --details"
+
+ssm-shell: ## SSM Session Manager で EC2 にシェル接続 (ENV=dev|prod)
+	$(eval INSTANCE_ID := $(shell cd deploy/terraform/envs/$(ENV) && terraform output -raw ec2_instance_id))
+	aws --profile sync-admin ssm start-session --target $(INSTANCE_ID)
 
 # ===== Release E2E =====
 

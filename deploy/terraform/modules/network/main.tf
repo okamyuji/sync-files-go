@@ -1,15 +1,13 @@
-// Package network sync-files-go の VPC・サブネット・セキュリティグループ・VPC エンドポイント。
-//
-// 設計書: docs/09-infrastructure-and-deployment.md §1, §14
+// Package network 単一 EC2 + RDS Multi-AZ のための最小 VPC。
 //
 // 構成:
 //   - VPC 10.0.0.0/16
-//   - Public Subnets (ECS Fargate タスク用、AZ a / c)
-//     ┗ ECS タスクは Public IP 付与で IGW 経由 outbound（NAT Gateway 不採用）
-//     ┗ Inbound はセキュリティグループで全 deny（Cloudflare Tunnel が outbound 接続）
-//   - Private Subnets (RDS 用、AZ a / c)
-//   - VPC エンドポイント: ECR (api + dkr), Secrets Manager, CloudWatch Logs (Interface)
-//   - VPC エンドポイント: S3 (Gateway, ECR pull の layer 取得を経由するため必須)
+//   - Public Subnet × 1 (EC2、IGW 経由 outbound)
+//   - Private Subnet × 2 (RDS Multi-AZ + Replica。RDS subnet group は最低 2 AZ 必須)
+//   - 3 SG: ec2 (80/443 from 0.0.0.0/0)、rds (3306 from ec2)、（vpce 不要、IGW 経由で AWS API へ到達）
+//
+// 設計判断: VPC エンドポイントは廃止（EC2 1 台 + IGW で十分。コスト 1 endpoint $7/月 × 4 = $28/月 を削減）。
+// AWS API への通信は IGW 経由で TLS 1.3、IAM 認証なので機密性問題なし。
 
 terraform {
   required_version = ">= 1.7.0"
@@ -43,16 +41,15 @@ resource "aws_internet_gateway" "main" {
   tags   = merge(local.tags, { Name = "sync-files-go-${var.env}-igw" })
 }
 
-// === Public Subnets (ECS) ===
+// === Public Subnet (EC2) ===
 
 resource "aws_subnet" "public" {
-  for_each                = { for i, az in local.azs : az => i }
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = cidrsubnet(var.vpc_cidr, 8, each.value + 1) // 10.0.1.0/24, 10.0.2.0/24
-  availability_zone       = each.key
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 1) // 10.0.1.0/24
+  availability_zone       = local.azs[0]
   map_public_ip_on_launch = true
   tags = merge(local.tags, {
-    Name = "sync-files-go-${var.env}-public-${each.key}"
+    Name = "sync-files-go-${var.env}-public"
     Tier = "public"
   })
 }
@@ -67,12 +64,11 @@ resource "aws_route_table" "public" {
 }
 
 resource "aws_route_table_association" "public" {
-  for_each       = aws_subnet.public
-  subnet_id      = each.value.id
+  subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
 
-// === Private Subnets (RDS) ===
+// === Private Subnets (RDS Multi-AZ; subnet group requires >=2 AZ) ===
 
 resource "aws_subnet" "private" {
   for_each          = { for i, az in local.azs : az => i }
@@ -85,8 +81,7 @@ resource "aws_subnet" "private" {
   })
 }
 
-// Private Subnet ルートテーブル（NAT Gateway 不採用なので外向きルート無し。
-// VPC エンドポイント経由でしか AWS API に到達しない）
+// Private Subnet ルートテーブル（外向きルートなし。RDS は VPC 内通信のみ）
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
   tags   = merge(local.tags, { Name = "sync-files-go-${var.env}-private-rt" })
@@ -100,114 +95,53 @@ resource "aws_route_table_association" "private" {
 
 // === Security Groups ===
 
-// ECS Fargate タスク用 SG。Inbound 全 deny、Outbound のみ許可。
-resource "aws_security_group" "ecs" {
-  name        = "sync-files-go-${var.env}-ecs"
-  description = "ECS Fargate task SG (no inbound, outbound to RDS / Cloudflare / VPCE)"
+// EC2 SG: 80/443 はインターネットから許可、SSH は閉じる (SSM Session Manager 経由)
+resource "aws_security_group" "ec2" {
+  name        = "sync-files-go-${var.env}-ec2"
+  description = "EC2 instance SG (HTTP 80 + HTTPS 443 from internet, no SSH)"
   vpc_id      = aws_vpc.main.id
-  tags        = merge(local.tags, { Name = "sync-files-go-${var.env}-ecs-sg" })
+  tags        = merge(local.tags, { Name = "sync-files-go-${var.env}-ec2-sg" })
 }
 
-resource "aws_vpc_security_group_egress_rule" "ecs_to_rds" {
-  security_group_id            = aws_security_group.ecs.id
-  description                  = "MySQL to RDS"
-  ip_protocol                  = "tcp"
-  from_port                    = 3306
-  to_port                      = 3306
-  referenced_security_group_id = aws_security_group.rds.id
-}
-
-resource "aws_vpc_security_group_egress_rule" "ecs_to_vpce" {
-  security_group_id            = aws_security_group.ecs.id
-  description                  = "HTTPS to VPC endpoints"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  referenced_security_group_id = aws_security_group.vpce.id
-}
-
-resource "aws_vpc_security_group_egress_rule" "ecs_to_internet_https" {
-  security_group_id = aws_security_group.ecs.id
-  description       = "HTTPS to internet (Cloudflare Tunnel + S3 Gateway endpoint via prefix list)"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-resource "aws_vpc_security_group_egress_rule" "ecs_to_internet_http" {
-  security_group_id = aws_security_group.ecs.id
-  description       = "HTTP for ECR layer download fallback (rare)"
+resource "aws_vpc_security_group_ingress_rule" "ec2_http" {
+  security_group_id = aws_security_group.ec2.id
+  description       = "HTTP from internet (Let's Encrypt ACME http-01 + redirect)"
   ip_protocol       = "tcp"
   from_port         = 80
   to_port           = 80
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-// RDS SG
+resource "aws_vpc_security_group_ingress_rule" "ec2_https" {
+  security_group_id = aws_security_group.ec2.id
+  description       = "HTTPS from internet"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+// outbound: 全許可（RDS / S3 / Secrets / OS update / ACME 検証 etc）
+resource "aws_vpc_security_group_egress_rule" "ec2_outbound" {
+  security_group_id = aws_security_group.ec2.id
+  description       = "Outbound all (RDS / AWS APIs / OS updates / ACME)"
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+// RDS SG: 3306 from EC2 SG only
 resource "aws_security_group" "rds" {
   name        = "sync-files-go-${var.env}-rds"
-  description = "RDS MySQL SG (3306 from ECS only)"
+  description = "RDS MySQL SG (3306 from EC2 only)"
   vpc_id      = aws_vpc.main.id
   tags        = merge(local.tags, { Name = "sync-files-go-${var.env}-rds-sg" })
 }
 
-resource "aws_vpc_security_group_ingress_rule" "rds_from_ecs" {
+resource "aws_vpc_security_group_ingress_rule" "rds_from_ec2" {
   security_group_id            = aws_security_group.rds.id
-  description                  = "MySQL from ECS"
+  description                  = "MySQL from EC2"
   ip_protocol                  = "tcp"
   from_port                    = 3306
   to_port                      = 3306
-  referenced_security_group_id = aws_security_group.ecs.id
-}
-
-// VPC エンドポイント SG (interface タイプ用)
-resource "aws_security_group" "vpce" {
-  name        = "sync-files-go-${var.env}-vpce"
-  description = "VPC endpoint SG (443 from ECS)"
-  vpc_id      = aws_vpc.main.id
-  tags        = merge(local.tags, { Name = "sync-files-go-${var.env}-vpce-sg" })
-}
-
-resource "aws_vpc_security_group_ingress_rule" "vpce_from_ecs" {
-  security_group_id            = aws_security_group.vpce.id
-  description                  = "HTTPS from ECS"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  referenced_security_group_id = aws_security_group.ecs.id
-}
-
-// === VPC Endpoints ===
-
-data "aws_region" "current" {}
-
-// Gateway endpoint (S3) — ECR layer の取得経路。Public Subnet に紐づける。
-resource "aws_vpc_endpoint" "s3" {
-  vpc_id            = aws_vpc.main.id
-  service_name      = "com.amazonaws.${data.aws_region.current.name}.s3"
-  vpc_endpoint_type = "Gateway"
-  route_table_ids   = [aws_route_table.public.id, aws_route_table.private.id]
-  tags              = merge(local.tags, { Name = "sync-files-go-${var.env}-vpce-s3" })
-}
-
-// Interface endpoints
-locals {
-  interface_endpoints = {
-    ecr_api = "ecr.api"
-    ecr_dkr = "ecr.dkr"
-    secrets = "secretsmanager"
-    logs    = "logs"
-  }
-}
-
-resource "aws_vpc_endpoint" "interface" {
-  for_each            = local.interface_endpoints
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${data.aws_region.current.name}.${each.value}"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [for s in aws_subnet.public : s.id]
-  security_group_ids  = [aws_security_group.vpce.id]
-  private_dns_enabled = true
-  tags                = merge(local.tags, { Name = "sync-files-go-${var.env}-vpce-${each.key}" })
+  referenced_security_group_id = aws_security_group.ec2.id
 }

@@ -16,6 +16,14 @@ output "primary_arn" {
   value = aws_db_instance.primary.arn
 }
 
+output "primary_identifier" {
+  value = aws_db_instance.primary.identifier
+}
+
+output "replica_identifier" {
+  value = aws_db_instance.replica.identifier
+}
+
 output "master_user_secret_arn" {
   description = "manage_master_user_password=true で自動生成された Secrets Manager シークレット ARN"
   value       = aws_db_instance.primary.master_user_secret[0].secret_arn

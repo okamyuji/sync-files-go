@@ -3,13 +3,13 @@ variable "env" {
   type        = string
 }
 
-variable "ecs_cluster_name" {
-  description = "監視対象 ECS クラスタ名"
+variable "ec2_instance_id" {
+  description = "監視対象 EC2 InstanceId"
   type        = string
 }
 
-variable "ecs_service_name" {
-  description = "監視対象 ECS サービス名"
+variable "rds_primary_identifier" {
+  description = "監視対象 RDS Primary の DBInstanceIdentifier"
   type        = string
 }
 
@@ -19,13 +19,12 @@ variable "rds_replica_identifier" {
 }
 
 variable "alert_emails" {
-  description = "アラートを SNS 経由で受信するメールアドレス（subscription confirmation が手動で必要）"
+  description = "アラートを受信するメールアドレス（subscription confirmation 必須）"
   type        = list(string)
   default     = []
 }
 
 variable "tags" {
-  description = "共通タグ"
-  type        = map(string)
-  default     = {}
+  type    = map(string)
+  default = {}
 }

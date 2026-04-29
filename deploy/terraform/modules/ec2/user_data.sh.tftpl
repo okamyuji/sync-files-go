@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# sync-files-go EC2 cloud-init
+#
+# Amazon Linux 2023 (arm64) で初回ブート時に実行される。
+# - dnf-automatic でセキュリティ更新自動適用
+# - nginx インストール + 設定（Let's Encrypt + reverse proxy）
+# - certbot で初回証明書取得 + 自動更新 timer
+# - /var/data を追加 EBS (xvdf) にマウント
+# - sync-files-go の /opt 配置 + systemd unit (server + 3 batch timers)
+# - CloudWatch Agent 起動 (logs + metrics)
+#
+# 後続の Go バイナリ配置はローカルから make deploy で SCP する想定（このスクリプトは骨組みだけ用意する）。
+
+set -euxo pipefail
+
+REGION="${region}"
+ENV="${env}"
+DOMAIN="${domain_name}"
+LE_EMAIL="${letsencrypt_email}"
+
+# ===== 0) 自動セキュリティ更新 =====
+dnf install -y dnf-automatic
+sed -i 's/^upgrade_type =.*/upgrade_type = security/' /etc/dnf/automatic.conf
+sed -i 's/^apply_updates =.*/apply_updates = yes/' /etc/dnf/automatic.conf
+systemctl enable --now dnf-automatic.timer
+
+# ===== 1) パッケージ =====
+dnf install -y nginx certbot python3-certbot-nginx amazon-cloudwatch-agent jq awscli
+
+# ===== 2) /var/data を追加 EBS にマウント =====
+DEV=/dev/nvme1n1   # AL2023 arm64 では nvme スキーム
+if ! lsblk -ndo NAME "$DEV" >/dev/null 2>&1; then
+  DEV=/dev/xvdf  # 旧 Xen 形式フォールバック
+fi
+if ! blkid "$DEV"; then
+  mkfs.ext4 -L data "$DEV"
+fi
+mkdir -p /var/data
+echo "LABEL=data  /var/data  ext4  defaults,nofail  0 2" >> /etc/fstab
+mount -a
+chown -R 65532:65532 /var/data
+chmod 755 /var/data
+
+# ===== 3) sync-files-go ユーザとディレクトリ =====
+useradd -r -u 65532 -s /sbin/nologin -d /opt/sync-files-go syncapp || true
+install -d -o syncapp -g syncapp /opt/sync-files-go/bin
+install -d -o syncapp -g syncapp /opt/sync-files-go/templates
+install -d -o syncapp -g syncapp /opt/sync-files-go/static
+install -d -o syncapp -g syncapp /var/log/sync-files-go
+
+# ===== 4) Secrets を一度取得して /etc/sync-files-go/env に書く =====
+mkdir -p /etc/sync-files-go
+chmod 700 /etc/sync-files-go
+
+fetch_secret() {
+  aws --region "$REGION" secretsmanager get-secret-value --secret-id "$1" \
+    --query SecretString --output text
+}
+
+cat > /etc/sync-files-go/env <<EOF
+APP_ENV=${env}
+PORT=8080
+DATA_DIR=/var/data
+DB_PRIMARY_HOST=${db_primary_host}
+DB_REPLICA_HOST=${db_replica_host}
+DB_PORT=3306
+DB_NAME=sync
+DB_USER=sync_app
+DB_TLS=required
+DB_PASSWORD=$(fetch_secret '${db_password_arn}')
+AES_MASTER_KEY=$(fetch_secret '${aes_master_arn}')
+TOTP_HMAC_KEY=$(fetch_secret '${totp_hmac_arn}')
+CSRF_KEY=$(fetch_secret '${csrf_arn}')
+SESSION_KEY=$(fetch_secret '${session_arn}')
+BASE_URL=${base_url}
+LOG_LEVEL=${log_level}
+MAX_UPLOAD_BYTES=${max_upload_bytes}
+READ_AFTER_WRITE_WINDOW_SECONDS=5
+REPLICA_LAG_DEGRADE_SECONDS=10
+S3_BACKUP_BUCKET=${s3_backup_bucket}
+EOF
+chown root:syncapp /etc/sync-files-go/env
+chmod 640 /etc/sync-files-go/env
+
+# ===== 5) systemd: sync-files-go.service =====
+cat > /etc/systemd/system/sync-files-go.service <<'UNIT'
+[Unit]
+Description=sync-files-go server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=syncapp
+Group=syncapp
+EnvironmentFile=/etc/sync-files-go/env
+ExecStart=/opt/sync-files-go/bin/sync-files-go
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/data /var/log/sync-files-go
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# ===== 6) systemd: バッチ 3 ジョブ (timer) =====
+for JOB in gc prune-old-versions reconcile; do
+  cat > /etc/systemd/system/sync-files-batch-$JOB.service <<UNIT
+[Unit]
+Description=sync-files-go batch: $JOB
+After=network-online.target sync-files-go.service
+
+[Service]
+Type=oneshot
+User=syncapp
+Group=syncapp
+EnvironmentFile=/etc/sync-files-go/env
+ExecStart=/opt/sync-files-go/bin/sync-files-batch $JOB
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/data /var/log/sync-files-go
+UNIT
+done
+
+cat > /etc/systemd/system/sync-files-batch-gc.timer <<'UNIT'
+[Unit]
+Description=Daily run sync-files-go gc
+[Timer]
+OnCalendar=*-*-* 18:00:00 Asia/Tokyo
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+
+cat > /etc/systemd/system/sync-files-batch-prune-old-versions.timer <<'UNIT'
+[Unit]
+Description=Daily run sync-files-go prune-old-versions
+[Timer]
+OnCalendar=*-*-* 19:00:00 Asia/Tokyo
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+
+cat > /etc/systemd/system/sync-files-batch-reconcile.timer <<'UNIT'
+[Unit]
+Description=Daily run sync-files-go reconcile
+[Timer]
+OnCalendar=*-*-* 17:00:00 Asia/Tokyo
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+# 実バイナリが配置された後に start する想定。enable のみここで行う。
+systemctl enable sync-files-go.service
+systemctl enable sync-files-batch-gc.timer sync-files-batch-prune-old-versions.timer sync-files-batch-reconcile.timer
+
+# ===== 7) nginx 設定 =====
+cat > /etc/nginx/conf.d/sync-files-go.conf <<EOF
+# initial HTTP server (Let's Encrypt webroot challenge と HTTPS 強制)
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name $DOMAIN;
+
+    location /.well-known/acme-challenge/ {
+        root /var/lib/letsencrypt;
+    }
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+# placeholder HTTPS server. certbot --nginx が cert を入れた後に有効化される。
+EOF
+
+mkdir -p /var/lib/letsencrypt
+systemctl enable --now nginx
+
+# ===== 8) Let's Encrypt 初期取得 =====
+# DNS の A レコードがまだ EIP を指していないと失敗するので、user_data 失敗は許容する。
+# ops は cloud-init 完了後に手動で `certbot --nginx -d $DOMAIN` を再実行する。
+if certbot --nginx --non-interactive --agree-tos --email "$LE_EMAIL" -d "$DOMAIN"; then
+  echo "[user_data] certbot succeeded"
+else
+  echo "[user_data] certbot failed; rerun manually after DNS propagation" >&2
+fi
+
+# nginx 設定追記: HTTPS で /var/data 以外を proxy_pass
+cat > /etc/nginx/conf.d/sync-files-go-https.conf <<EOF
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $DOMAIN;
+
+    ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    ssl_protocols       TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    client_max_body_size 2200m;
+    proxy_buffering on;
+    proxy_request_buffering on;
+
+    limit_req_zone \$remote_addr zone=ip:10m rate=300r/m;
+
+    location /healthz { proxy_pass http://127.0.0.1:8080/healthz; }
+
+    location / {
+        limit_req zone=ip burst=200 nodelay;
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_set_header Connection '';
+        chunked_transfer_encoding off;
+    }
+}
+EOF
+
+# certbot 自動更新は AL2023 では certbot-renew.timer が apt 同様に走る
+systemctl enable --now certbot-renew.timer || true
+
+nginx -t && systemctl reload nginx || true
+
+# ===== 9) CloudWatch Agent =====
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
+{
+  "agent": { "run_as_user": "root" },
+  "metrics": {
+    "namespace": "sync-files-go",
+    "metrics_collected": {
+      "mem":    { "measurement": ["mem_used_percent"] },
+      "disk":   { "measurement": ["used_percent"], "resources": ["/", "/var/data"] },
+      "swap":   { "measurement": ["swap_used_percent"] }
+    },
+    "append_dimensions": { "Env": "$ENV" }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          { "file_path": "/var/log/messages",                  "log_group_name": "/sync-files-go/$ENV/system" },
+          { "file_path": "/var/log/nginx/access.log",          "log_group_name": "/sync-files-go/$ENV/nginx" },
+          { "file_path": "/var/log/nginx/error.log",           "log_group_name": "/sync-files-go/$ENV/nginx" },
+          { "file_path": "/var/log/sync-files-go/server.log",  "log_group_name": "/sync-files-go/$ENV/app" }
+        ]
+      }
+    }
+  }
+}
+EOF
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+echo "[user_data] cloud-init done. Now SCP /opt/sync-files-go/bin/sync-files-* binaries and start sync-files-go.service."

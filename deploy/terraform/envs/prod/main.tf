@@ -1,4 +1,4 @@
-// prod 環境のエントリーポイント。dev とほぼ同じだが env=prod、deletion_protection、ログ保持 90 日 etc。
+// prod 環境のエントリーポイント。dev と同じ module 構成、prod 強化のみ差分。
 
 terraform {
   required_version = ">= 1.7.0"
@@ -8,7 +8,8 @@ terraform {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region  = var.aws_region
+  profile = var.aws_profile
   default_tags {
     tags = {
       Project   = "sync-files-go"
@@ -29,16 +30,10 @@ module "network" {
   tags   = local.tags
 }
 
-module "ecr" {
-  source = "../../modules/ecr"
-  env    = local.env
-  tags   = local.tags
-}
-
 module "secrets" {
   source                  = "../../modules/secrets"
   env                     = local.env
-  recovery_window_in_days = 30 // prod は 30 日論理削除猶予
+  recovery_window_in_days = 30
   tags                    = local.tags
 }
 
@@ -57,51 +52,32 @@ module "rds" {
   tags                  = local.tags
 }
 
+module "ec2" {
+  source                  = "../../modules/ec2"
+  env                     = local.env
+  instance_type           = var.instance_type
+  data_volume_gb          = var.data_volume_gb
+  snapshot_retention_days = 30
+  public_subnet_id        = module.network.public_subnet_id
+  ec2_security_group_id   = module.network.ec2_security_group_id
+  secret_arns             = module.secrets.secret_arns
+  s3_backup_bucket_id     = module.s3files.bucket_id
+  s3_backup_bucket_arn    = module.s3files.bucket_arn
+  db_primary_host         = module.rds.primary_endpoint
+  db_replica_host         = module.rds.replica_endpoint
+  domain_name             = var.domain_name
+  letsencrypt_email       = var.letsencrypt_email
+  base_url                = var.base_url
+  log_level               = "info"
+  tags                    = local.tags
+}
+
 module "observability" {
   source                 = "../../modules/observability"
   env                    = local.env
-  ecs_cluster_name       = "sync-files-go-${local.env}"
-  ecs_service_name       = "sync-files-go"
-  rds_replica_identifier = "sync-files-go-${local.env}-replica-1"
+  ec2_instance_id        = module.ec2.instance_id
+  rds_primary_identifier = module.rds.primary_identifier
+  rds_replica_identifier = module.rds.replica_identifier
   alert_emails           = var.alert_emails
   tags                   = local.tags
-}
-
-module "ecs" {
-  source                = "../../modules/ecs"
-  env                   = local.env
-  image_tag             = var.image_tag
-  app_image_url         = module.ecr.app_repository_url
-  nginx_image_url       = module.ecr.nginx_repository_url
-  public_subnet_ids     = module.network.public_subnet_ids
-  ecs_security_group_id = module.network.ecs_security_group_id
-  secret_arns           = module.secrets.secret_arns
-  db_primary_host       = module.rds.primary_endpoint
-  db_replica_host       = module.rds.replica_endpoint
-  base_url              = var.base_url
-  log_level             = "info"
-  log_group_app         = module.observability.log_group_names["app"]
-  log_group_nginx       = module.observability.log_group_names["nginx"]
-  log_group_cloudflared = module.observability.log_group_names["cloudflared"]
-  s3_backend_bucket_arn = module.s3files.bucket_arn
-
-  efs_file_system_id  = var.efs_file_system_id
-  efs_access_point_id = var.efs_access_point_id
-
-  tags = local.tags
-}
-
-module "batch" {
-  source                = "../../modules/batch"
-  env                   = local.env
-  image_tag             = var.image_tag
-  app_image_url         = module.ecr.app_repository_url
-  ecs_cluster_arn       = module.ecs.cluster_arn
-  public_subnet_ids     = module.network.public_subnet_ids
-  ecs_security_group_id = module.network.ecs_security_group_id
-  secret_arns           = module.secrets.secret_arns
-  db_primary_host       = module.rds.primary_endpoint
-  db_replica_host       = module.rds.replica_endpoint
-  log_group_batch       = module.observability.batch_log_group_name
-  tags                  = local.tags
 }

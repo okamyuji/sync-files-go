@@ -2,14 +2,14 @@ output "vpc_id" {
   value = module.network.vpc_id
 }
 
-output "ecr_app_url" {
-  description = "docker push の宛先 (app)"
-  value       = module.ecr.app_repository_url
+output "elastic_ip" {
+  description = "EC2 の固定 IP。ユーザの DNS プロバイダで A レコードを向ける"
+  value       = module.ec2.elastic_ip
 }
 
-output "ecr_nginx_url" {
-  description = "docker push の宛先 (nginx)"
-  value       = module.ecr.nginx_repository_url
+output "ec2_instance_id" {
+  description = "SSM Session Manager で接続するときの InstanceId"
+  value       = module.ec2.instance_id
 }
 
 output "rds_primary_endpoint" {
@@ -21,22 +21,13 @@ output "rds_replica_endpoint" {
 }
 
 output "rds_master_user_secret_arn" {
-  description = "RDS の自動生成マスターパスワードシークレット (manage_master_user_password=true)"
-  value       = module.rds.master_user_secret_arn
+  value = module.rds.master_user_secret_arn
 }
 
-output "ecs_cluster_name" {
-  value = module.ecs.cluster_name
-}
-
-output "ecs_service_name" {
-  value = module.ecs.service_name
+output "s3_backup_bucket" {
+  value = module.s3files.bucket_id
 }
 
 output "alerts_topic_arn" {
   value = module.observability.alerts_topic_arn
-}
-
-output "batch_schedule_group" {
-  value = module.batch.schedule_group_name
 }

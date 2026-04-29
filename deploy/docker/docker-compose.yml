@@ -1,0 +1,70 @@
+# sync-files-go ローカル開発用 docker compose
+#
+# Phase 1 では mysql + app の最小構成。Phase 5 で nginx も加える。
+# Cloudflare Tunnel は本番用なのでローカルでは起動しない（直接 localhost:8080 にアクセス）。
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: sync-files-mysql
+    environment:
+      MYSQL_DATABASE: sync
+      MYSQL_USER: sync_app
+      MYSQL_PASSWORD: dev
+      MYSQL_ROOT_PASSWORD: rootdev
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --binlog-format=ROW
+      - --innodb-buffer-pool-size=256M
+      - --ngram_token_size=2
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysqldata:/var/lib/mysql
+      - ../../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootdev"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Phase 1 では「Read Replica は同 mysql コンテナを向ける」（DBRouter は同じ DB を 2 つの *sql.DB で開く）。
+  # Phase 6 まで来たら別コンテナで MySQL Replication を組む（あるいは本番は RDS Read Replica を使う）。
+
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/app.Dockerfile
+    container_name: sync-files-app
+    environment:
+      APP_ENV: local
+      PORT: "8080"
+      DATA_DIR: /var/data
+      DB_PRIMARY_HOST: mysql
+      DB_REPLICA_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: sync
+      DB_USER: sync_app
+      DB_PASSWORD: dev
+      DB_TLS: preferred
+      LOG_LEVEL: debug
+      MAX_UPLOAD_BYTES: "2147483648"
+      READ_AFTER_WRITE_WINDOW_SECONDS: "5"
+      REPLICA_LAG_DEGRADE_SECONDS: "10"
+      # 開発用ダミー鍵（本番は Secrets Manager から）。base64 32 bytes。
+      AES_MASTER_KEY: "ZGV2X21hc3Rlcl9rZXlfMzJfYnl0ZXNfX19fX19fX19fX180eHk="
+      TOTP_HMAC_KEY:  "ZGV2X3RvdHBfaG1hY19rZXlfMzJfYnl0ZXNfX19fX19fX18yYWE="
+      CSRF_KEY:       "ZGV2X2NzcmZfa2V5XzMyX2J5dGVzX19fX19fX19fX19fX19fX19f"
+      SESSION_KEY:    "ZGV2X3Nlc3Npb25fa2V5XzMyX2J5dGVzX19fX19fX19fX19fX18="
+      BASE_URL: http://localhost:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - localdata:/var/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysqldata:
+  localdata:

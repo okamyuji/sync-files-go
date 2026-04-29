@@ -85,6 +85,11 @@ func NewServer(d *Deps) http.Handler {
 		mux.Handle("GET /share-links", authMW(shareLinksPageHandler(d)))
 		mux.Handle("GET /activity", authMW(activityPageHandler(d)))
 		mux.Handle("GET /settings", authMW(settingsPageHandler(d)))
+
+		// TOTP (Google Authenticator) 設定 / 有効化 / 解除
+		mux.Handle("GET /settings/security/totp/setup", authMW(totpSetupPageHandler(d)))
+		mux.Handle("POST /settings/security/totp/enable", authMW(totpEnableHandler(d)))
+		mux.Handle("POST /settings/security/totp/disable", authMW(totpDisableHandler(d)))
 	}
 
 	// 公開リンク（認証必須側）

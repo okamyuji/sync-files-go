@@ -242,14 +242,13 @@ func wrapKeyDev(plain, master []byte) []byte {
 	return out
 }
 
-// unwrapTOTPSecret 保存された TOTP secret を取り出す。Phase 4 で AES-GCM 復号に置換。
-func unwrapTOTPSecret(u *mysql.User, _ []byte) ([]byte, error) {
-	// Phase 3 ではプレースホルダ：totp_secret_enc にそのまま raw secret が入っている前提で扱う。
-	// Phase 4 で AES-GCM (header + ciphertext) に置換する。
+// unwrapTOTPSecret 保存された TOTP secret を AES-256-GCM で復号する。
+// 暗号化形式: crypto.EncryptTOTPSecret 参照（version + nonce + ciphertext + tag）。
+func unwrapTOTPSecret(u *mysql.User, masterKey []byte) ([]byte, error) {
 	if len(u.TOTPSecretEnc) == 0 {
 		return nil, errors.New("totp secret not set")
 	}
-	return u.TOTPSecretEnc, nil
+	return crypto.DecryptTOTPSecret(u.TOTPSecretEnc, masterKey)
 }
 
 func decodeJSON(r *http.Request, v any) error {

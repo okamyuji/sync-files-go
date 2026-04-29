@@ -8,6 +8,7 @@
 - v1 機能スコープ（[`01-requirements.md`](./01-requirements.md)）をすべて実装する
 - 不変条件 INV-1〜INV-5（[`04-sync-semantics.md`](./04-sync-semantics.md)）を構造的に守る
 - ローカル Docker での E2E green → Terraform デプロイ後の実ブラウザ統合テスト green でリリース可
+- **全 Phase で `make lint` (= go vet + staticcheck + golangci-lint) と `make test -race` が green** であることを必須条件とする
 
 ## Phase 一覧
 

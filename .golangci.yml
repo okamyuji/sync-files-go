@@ -1,0 +1,121 @@
+# golangci-lint v2 設定 (sync-files-go)
+#
+# 品質ゲートの一部として `make lint` から呼ばれる。
+# 設計書 11-testing-strategy.md §8.1 / §12.1 に従う。
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+  go: "1.23"
+
+output:
+  formats:
+    text:
+      path: stdout
+      print-linter-name: true
+      print-issued-lines: true
+
+linters:
+  default: none
+  enable:
+    # 標準系（必須）
+    - errcheck      # 戻り値 error の無視
+    - govet         # go vet 相当
+    - ineffassign   # 使われない代入
+    - staticcheck   # コード品質の中核
+    - unused        # 未使用シンボル
+
+    # セキュリティ
+    - gosec         # 静的セキュリティスキャン
+
+    # スタイル / 一貫性
+    - revive        # golint 後継
+    - misspell      # 英語スペル
+
+    # 危険パターン検知
+    - bodyclose     # net/http response body の Close 漏れ
+    - rowserrcheck  # rows.Err() 漏れ
+    - sqlclosecheck # rows / stmt の Close 漏れ
+    - errorlint     # errors.Is / errors.As の使い方
+    - nilerr        # err == nil 検査後に nil 以外を返すバグ
+    - contextcheck  # context.Context の伝播漏れ
+
+    # コード品質
+    - gocyclo       # 循環的複雑度
+    - dupl          # コード重複
+    - prealloc      # slice make 容量指定
+    - unconvert     # 不要な型変換
+    - unparam       # 未使用パラメータ
+
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -ST1000   # package コメント必須化はしない
+
+    gosec:
+      severity: low
+      excludes:
+        - G404   # crypto/rand を使っているので math/rand 警告は不要範囲
+
+    gocyclo:
+      min-complexity: 15
+
+    dupl:
+      threshold: 120
+
+    revive:
+      rules:
+        - name: var-naming
+        - name: error-return
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: range
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+          disabled: true
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+    misspell:
+      locale: US
+
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+  exclusions:
+    paths:
+      - dist
+      - tests/e2e
+    rules:
+      # テストでは長めの関数や複雑度・errcheck を許容
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - dupl
+          - errcheck
+          - gosec
+      # main は CLI 結線で複雑度が高くなりがち
+      - path: cmd/.+/main\.go
+        linters:
+          - gocyclo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/okamyuji/sync-files-go

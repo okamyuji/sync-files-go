@@ -4,18 +4,19 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 )
 
-// EncryptionScheme 列に保存する文字列。実装の互換性切替の主軸。
+// EncryptionSchemeV1 v1 暗号化スキームの識別子。`file_versions.encryption_scheme` 列に保存する。
 const EncryptionSchemeV1 = "aead-aes256-gcm-chunked-1mb-v1"
 
-// AEADChunkSize は 1 MiB チャンク（設計書 07-security.md §4.2）。
+// AEADChunkSize ストリーム AEAD の 1 チャンクサイズ（1 MiB、設計書 07-security.md §4.2）。
 const AEADChunkSize = 1 << 20
 
-// EncryptStream は src を読み出しながら 1MB チャンク AEAD で暗号化して dst に書き込む。
+// EncryptStream src を読み出しながら 1MB チャンク AEAD で暗号化して dst に書き込む。
 //
 // フレームフォーマット (各チャンクを順序付きで append):
 //   - チャンクヘッダ:    nonce (12 bytes) || ciphertext (n bytes) || tag (GCM 16 bytes 込み)
@@ -66,11 +67,7 @@ func EncryptStream(dst io.Writer, src io.Reader, key, aad []byte) (header []byte
 
 		nonce := make([]byte, 12)
 		copy(nonce, base)
-		// counter (big-endian)
-		nonce[8] = byte(counter >> 24)
-		nonce[9] = byte(counter >> 16)
-		nonce[10] = byte(counter >> 8)
-		nonce[11] = byte(counter)
+		binary.BigEndian.PutUint32(nonce[8:], counter)
 		counter++
 
 		// 最終チャンクには 'last' AAD を加えて改ざん耐性を高める
@@ -81,9 +78,9 @@ func EncryptStream(dst io.Writer, src io.Reader, key, aad []byte) (header []byte
 		ct := aead.Seal(nil, nonce, buf[:n], ad)
 
 		// length prefix (4 bytes BE) + ciphertext
-		lenBuf := []byte{
-			byte(len(ct) >> 24), byte(len(ct) >> 16), byte(len(ct) >> 8), byte(len(ct)),
-		}
+		// len(ct) は AEADChunkSize+overhead 以下（事前 invariant）なので uint32 に収まる
+		lenBuf := make([]byte, 4)
+		binary.BigEndian.PutUint32(lenBuf, uint32(len(ct))) // #nosec G115 -- bounded by AEADChunkSize + overhead
 		if _, err := dst.Write(lenBuf); err != nil {
 			return nil, err
 		}
@@ -97,7 +94,7 @@ func EncryptStream(dst io.Writer, src io.Reader, key, aad []byte) (header []byte
 	}
 }
 
-// DecryptStream は EncryptStream の逆。aad は同じ値を指定する必要がある。
+// DecryptStream EncryptStream の逆。aad は同じ値を指定する必要がある。
 func DecryptStream(dst io.Writer, src io.Reader, key, aad, header []byte) error {
 	if len(key) != 32 {
 		return errors.New("decrypt: key must be 32 bytes")
@@ -115,48 +112,19 @@ func DecryptStream(dst io.Writer, src io.Reader, key, aad, header []byte) error 
 	}
 
 	var counter uint32
-	lenBuf := make([]byte, 4)
 	for {
-		_, rerr := io.ReadFull(src, lenBuf)
-		if rerr == io.EOF {
-			return nil
-		}
-		if rerr != nil {
-			return rerr
-		}
-		ctLen := int(lenBuf[0])<<24 | int(lenBuf[1])<<16 | int(lenBuf[2])<<8 | int(lenBuf[3])
-		if ctLen <= 0 || ctLen > AEADChunkSize+aead.Overhead() {
-			return fmt.Errorf("decrypt: bogus chunk length %d", ctLen)
-		}
-		ct := make([]byte, ctLen)
-		if _, err := io.ReadFull(src, ct); err != nil {
+		ct, isLast, err := readChunk(src, aead.Overhead())
+		if err != nil {
 			return err
 		}
-
-		nonce := make([]byte, 12)
-		copy(nonce, header)
-		nonce[8] = byte(counter >> 24)
-		nonce[9] = byte(counter >> 16)
-		nonce[10] = byte(counter >> 8)
-		nonce[11] = byte(counter)
-		counter++
-
-		// 最終チャンクは length < AEADChunkSize（GCM tag 16 bytes 込み）
-		isLast := ctLen < AEADChunkSize+aead.Overhead()
-		ad := aad
-		if isLast {
-			ad = append([]byte("last:"), aad...)
+		if ct == nil {
+			return nil
 		}
-		pt, err := aead.Open(nil, nonce, ct, ad)
+		pt, err := decryptChunk(aead, ct, aad, header, counter, isLast)
 		if err != nil {
-			// 「最終チャンクの推定」が外れたら通常 AAD で再試行（そのチャンクが偶然短かった場合）
-			if isLast {
-				pt, err = aead.Open(nil, nonce, ct, aad)
-			}
-			if err != nil {
-				return fmt.Errorf("decrypt chunk %d: %w", counter-1, err)
-			}
+			return fmt.Errorf("decrypt chunk %d: %w", counter, err)
 		}
+		counter++
 		if _, err := dst.Write(pt); err != nil {
 			return err
 		}
@@ -164,4 +132,49 @@ func DecryptStream(dst io.Writer, src io.Reader, key, aad, header []byte) error 
 			return nil
 		}
 	}
+}
+
+// readChunk length-prefix を読み、ciphertext を読み出す。
+// 戻り値の ct == nil は EOF（チャンクなし）。
+func readChunk(src io.Reader, overhead int) (ct []byte, isLast bool, err error) {
+	lenBuf := make([]byte, 4)
+	if _, rerr := io.ReadFull(src, lenBuf); rerr != nil {
+		if errors.Is(rerr, io.EOF) {
+			return nil, false, nil
+		}
+		return nil, false, rerr
+	}
+	ctLen := int(binary.BigEndian.Uint32(lenBuf))
+	maxLen := AEADChunkSize + overhead
+	if ctLen <= 0 || ctLen > maxLen {
+		return nil, false, fmt.Errorf("decrypt: bogus chunk length %d", ctLen)
+	}
+	ct = make([]byte, ctLen)
+	if _, err := io.ReadFull(src, ct); err != nil {
+		return nil, false, err
+	}
+	isLast = ctLen < maxLen
+	return ct, isLast, nil
+}
+
+func decryptChunk(aead cipher.AEAD, ct, aad, header []byte, counter uint32, isLast bool) ([]byte, error) {
+	nonce := make([]byte, 12)
+	copy(nonce, header)
+	binary.BigEndian.PutUint32(nonce[8:], counter)
+
+	ad := aad
+	if isLast {
+		ad = append([]byte("last:"), aad...)
+	}
+	pt, err := aead.Open(nil, nonce, ct, ad)
+	if err == nil {
+		return pt, nil
+	}
+	// 最終チャンクの推定が外れたケース（偶然短かったチャンク）：通常 AAD で再試行
+	if isLast {
+		if pt2, err2 := aead.Open(nil, nonce, ct, aad); err2 == nil {
+			return pt2, nil
+		}
+	}
+	return nil, err
 }

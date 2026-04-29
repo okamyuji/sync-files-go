@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// NewLogger は LOG_LEVEL に応じて JSON 構造化ロガーを返す。
+// NewLogger LOG_LEVEL に応じて JSON 構造化ロガーを返す。
 func NewLogger(level string) *slog.Logger {
 	var lvl slog.Level
 	switch strings.ToLower(level) {

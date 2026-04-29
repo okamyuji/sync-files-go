@@ -287,15 +287,21 @@ func TestRenameDoesNotMoveStorageObject(t *testing.T) {
 
 ## 8. セキュリティテスト
 
-### 8.1 静的解析
+### 8.1 静的解析（品質ゲート）
 
-- `go vet`
-- `staticcheck`
-- `gosec` (`-quiet -severity high`)
-- `govulncheck`（脆弱性 DB）
-- `golangci-lint` の標準ルール
+`make lint` を CI 必須ゲートとし、3 段すべてが pass しないと merge 不可：
 
-CI で必須。
+1. `go vet` — 標準
+2. `staticcheck -checks=all,-ST1000` — 大量のコード品質チェック
+3. `golangci-lint run` — `errcheck` / `gosec` / `revive` / `bodyclose` / `rowserrcheck` / `sqlclosecheck` / `errorlint` / `nilerr` / `contextcheck` / `gocyclo` / `dupl` / `prealloc` / `unconvert` / `unparam` / `misspell` / `gofmt` / `goimports` を有効化（設定: `.golangci.yml`）
+
+ツールは `make tools-install` で固定バージョン投入：
+- `staticcheck@2025.1.1`
+- `golangci-lint v1.62.0` 以上（v2 系設定スキーマ対応）
+
+加えて月次で：
+- `govulncheck`（脆弱性 DB スキャン）
+- `gosec ./...`（個別実行）
 
 ### 8.2 動的テスト
 

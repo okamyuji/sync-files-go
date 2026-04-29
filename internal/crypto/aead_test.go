@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestAEAD_RoundTrip は 1MB / 100MB のラウンドトリップ + AAD 検証を行う。
+// TestAEAD_RoundTrip 1MB / 100MB のラウンドトリップ + AAD 検証を行う。
 //
 // 設計書 11-testing-strategy.md の Phase 2 受け入れ基準。
 // 2GB は時間がかかるので Phase 5 の E2E に回す。
@@ -51,7 +51,7 @@ func TestAEAD_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestAEAD_AADMismatch は AAD が違うと復号が失敗することを確認する（取り違え防止）。
+// TestAEAD_AADMismatch AAD が違うと復号が失敗することを確認する（取り違え防止）。
 func TestAEAD_AADMismatch(t *testing.T) {
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
@@ -70,7 +70,7 @@ func TestAEAD_AADMismatch(t *testing.T) {
 	}
 }
 
-// TestAEAD_Tampering は ciphertext を改ざんすると復号が失敗することを確認。
+// TestAEAD_Tampering ciphertext を改ざんすると復号が失敗することを確認。
 func TestAEAD_Tampering(t *testing.T) {
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)

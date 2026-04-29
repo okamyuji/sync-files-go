@@ -13,12 +13,12 @@ import (
 type OCCOutcome int
 
 const (
-	OCCAccept              OCCOutcome = iota // 通常の上書き、または新規作成
-	OCCForceAccept                            // If-Match: * （ユーザが強制上書きを選択）
-	OCCConflict                               // If-Match のバージョンが古い
-	OCCPreconditionFailed                     // 412：新規作成と矛盾、または対象が存在しない
-	OCCNeedPrecondition                       // 428：ヘッダなし
-	OCCFileGone                               // 410：対象が trashed/purged/gone
+	OCCAccept             OCCOutcome = iota // 通常の上書き、または新規作成
+	OCCForceAccept                          // If-Match: * （ユーザが強制上書きを選択）
+	OCCConflict                             // If-Match のバージョンが古い
+	OCCPreconditionFailed                   // 412：新規作成と矛盾、または対象が存在しない
+	OCCNeedPrecondition                     // 428：ヘッダなし
+	OCCFileGone                             // 410：対象が trashed/purged/gone
 )
 
 func (o OCCOutcome) String() string {
@@ -39,7 +39,7 @@ func (o OCCOutcome) String() string {
 	return fmt.Sprintf("unknown(%d)", o)
 }
 
-// Precondition は HTTP の If-Match / If-None-Match を解釈した結果。
+// Precondition HTTP の If-Match / If-None-Match を解釈した結果。
 type Precondition struct {
 	IfMatch     string // 値の例: "<version_uuid>" / "*" / ""
 	IfNoneMatch string // 値の例: "*" / ""
@@ -52,7 +52,7 @@ type CurrentRef struct {
 	CurrentVersionID uuid.UUID
 }
 
-// ResolveOCC は Precondition と現行参照を比較して OCC の判定を返す。
+// ResolveOCC Precondition と現行参照を比較して OCC の判定を返す。
 //
 // 純関数。DB アクセス・I/O・時計依存なし。Phase 2 単体テストの中心。
 func ResolveOCC(cur *CurrentRef, pre Precondition) OCCOutcome {

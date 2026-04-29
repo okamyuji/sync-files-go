@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/okamyuji/sync-files-go/internal/repo"
 )
 
@@ -33,11 +34,12 @@ func Chain(h http.Handler, mws ...func(http.Handler) http.Handler) http.Handler 
 func Recovery(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
 			defer func() {
 				if v := recover(); v != nil {
-					logger.Error("panic recovered",
+					logger.ErrorContext(ctx, "panic recovered",
 						"panic", v,
-						"request_id", RequestIDFrom(r.Context()),
+						"request_id", RequestIDFrom(ctx),
 						"path", r.URL.Path, "method", r.Method)
 					http.Error(w, "internal server error", http.StatusInternalServerError)
 				}
@@ -75,11 +77,12 @@ func RequestIDFrom(ctx context.Context) string {
 func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
 			started := time.Now()
 			rec := &statusRecorder{ResponseWriter: w, status: 200}
 			next.ServeHTTP(rec, r)
-			logger.Info("http",
-				"request_id", RequestIDFrom(r.Context()),
+			logger.InfoContext(ctx, "http",
+				"request_id", RequestIDFrom(ctx),
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", rec.status,

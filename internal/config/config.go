@@ -33,7 +33,7 @@ type Config struct {
 	SessionKey   []byte
 }
 
-// DBConfig は MySQL Primary / Replica の接続情報。
+// DBConfig MySQL Primary / Replica の接続情報。
 type DBConfig struct {
 	PrimaryHost string
 	ReplicaHost string
@@ -96,7 +96,7 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// MySQLDSN は database/sql で使う DSN 文字列を組み立てる (host=primary or replica)。
+// MySQLDSN database/sql で使う DSN 文字列を組み立てる (host=primary or replica)。
 func (c *Config) MySQLDSN(host string) string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=false&tls=%s",
 		c.DB.User, c.DB.Password, host, c.DB.Port, c.DB.Name, c.DB.TLS)

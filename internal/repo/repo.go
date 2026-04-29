@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+
 	"github.com/okamyuji/sync-files-go/internal/domain"
 )
 
@@ -28,16 +29,19 @@ type FilesWriter interface {
 	Purge(ctx context.Context, fileID uuid.UUID) error
 }
 
-// FileVersionsWriter は file_versions の書き込み。
+// FileVersionsWriter file_versions の書き込み。
 type FileVersionsWriter interface {
 	Insert(ctx context.Context, v *domain.FileVersion) error
 	NextVersionNumber(ctx context.Context, fileID uuid.UUID) (int, error)
 }
 
-// ShareLinksWriter / ShareLinksReader は公開リンク。
+// ShareLinksReader 公開リンクの読み取り側 interface。
+// H-2 修正により Primary 側で実行される（Replica 遅延中の取り消し漏れを防ぐ）。
 type ShareLinksReader interface {
 	FindByTokenHash(ctx context.Context, tokenHash []byte) (*domain.ShareLink, error)
 }
+
+// ShareLinksWriter 公開リンクの書き込み側 interface。
 type ShareLinksWriter interface {
 	Insert(ctx context.Context, s *domain.ShareLink) error
 	Revoke(ctx context.Context, id uuid.UUID) error

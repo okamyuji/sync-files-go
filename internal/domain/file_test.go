@@ -19,9 +19,9 @@ func TestFileState_CanTransitionTo(t *testing.T) {
 		{FileStateActive, FileStatePurged, false},
 		{FileStateActive, FileStateGone, false},
 
-		{FileStateTrashed, FileStateActive, true},  // 復元
-		{FileStateTrashed, FileStatePurged, true},  // 30 日経過 or 明示 purge
-		{FileStateTrashed, FileStateGone, false},   // 直接 gone は不可
+		{FileStateTrashed, FileStateActive, true}, // 復元
+		{FileStateTrashed, FileStatePurged, true}, // 30 日経過 or 明示 purge
+		{FileStateTrashed, FileStateGone, false},  // 直接 gone は不可
 
 		{FileStatePurged, FileStateGone, true},
 		{FileStatePurged, FileStateActive, false},
@@ -37,7 +37,7 @@ func TestFileState_CanTransitionTo(t *testing.T) {
 	}
 }
 
-// TestFile_SoftDelete_INV1 は active からの即時 purge を禁止する INV-1 を構造的に確認する。
+// TestFile_SoftDelete_INV1 active からの即時 purge を禁止する INV-1 を構造的に確認する。
 func TestFile_SoftDelete_INV1(t *testing.T) {
 	now := time.Now()
 	f := &File{State: FileStateActive}
@@ -65,7 +65,7 @@ func TestFile_SoftDelete_INV1(t *testing.T) {
 	}
 }
 
-// TestFile_Restore は trashed → active を確認する。
+// TestFile_Restore trashed → active を確認する。
 func TestFile_Restore(t *testing.T) {
 	now := time.Now()
 	deletedAt := now.Add(-1 * time.Hour)

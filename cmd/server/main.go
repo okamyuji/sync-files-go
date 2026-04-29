@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -94,20 +95,26 @@ func run() error {
 	}
 }
 
-// healthCheckClient は Dockerfile の `ENTRYPOINT ["/sync-files-go", "healthcheck"]` で
+// healthCheckClient Dockerfile の `ENTRYPOINT ["/sync-files-go", "healthcheck"]` で
 // 呼ばれるためのクライアント。`PORT` から組み立てた URL に対し /healthz を叩く。
+// PORT は数値として厳格に検証してから URL に組み込む（gosec G704 対策）。
 func healthCheckClient() error {
-	addr := os.Getenv("PORT")
-	if addr == "" {
-		addr = "8080"
+	port := 8080
+	if v := os.Getenv("PORT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 || n > 65535 {
+			return fmt.Errorf("healthcheck: invalid PORT %q", v)
+		}
+		port = n
 	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
 	cli := &http.Client{Timeout: 5 * time.Second}
-	resp, err := cli.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", addr))
+	resp, err := cli.Get(url) // #nosec G107,G704 -- 127.0.0.1 + 検証済み数値 port のみ。SSRF にならない
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("healthcheck: unexpected status %d", resp.StatusCode)
 	}
 	return nil

@@ -76,3 +76,6 @@ tests/e2e/test-results/
 tests/e2e/.cache/
 package-lock.json
 **/package-lock.json
+
+# Playwright MCP artifacts
+.playwright-mcp/

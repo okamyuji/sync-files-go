@@ -1,4 +1,16 @@
 import { APIRequestContext, expect } from '@playwright/test';
+import { randomBytes } from 'node:crypto';
+
+/**
+ * 暗号学的に安全な乱数から base36 文字列を返す。
+ * テストの一意性確保だけでなく、パスワード生成にも使うため CSPRNG に統一する。
+ */
+function secureRandomBase36(length: number): string {
+  return randomBytes(Math.ceil(length * 1.5))
+    .toString('hex')
+    .replace(/[^0-9a-z]/g, '')
+    .slice(0, length);
+}
 
 /**
  * 一意なメールアドレスを生成する。並列実行・複数 spec での衝突を避けるため、
@@ -6,7 +18,7 @@ import { APIRequestContext, expect } from '@playwright/test';
  */
 export function uniqueEmail(prefix = 'e2e'): string {
   const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
+  const rand = secureRandomBase36(6);
   return `${prefix}-${ts}-${rand}@example.com`;
 }
 
@@ -24,7 +36,7 @@ export async function signupAndLogin(
   passwordOverride?: string,
 ): Promise<{ email: string; password: string; csrf: string; recoveryCodes: string[] }> {
   const email = uniqueEmail();
-  const password = passwordOverride ?? 'testpass-' + Math.random().toString(36).slice(2, 8);
+  const password = passwordOverride ?? 'testpass-' + secureRandomBase36(6);
 
   // 1) CSRF Cookie を発行させる
   await request.get(`${baseURL}/signup`);

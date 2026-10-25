@@ -1,6 +1,6 @@
 module github.com/okamyuji/sync-files-go
 
-go 1.25.0
+go 1.26.10
 
 require (
 	github.com/go-sql-driver/mysql v1.9.3
@@ -9,7 +9,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.42.0
 	golang.org/x/crypto v0.52.0
-	golang.org/x/text v0.37.0
+	golang.org/x/text v0.43.0
 )
 
 require (

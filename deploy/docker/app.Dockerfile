@@ -2,13 +2,13 @@
 #
 # sync-files-go アプリケーションコンテナ
 #
-# - ビルド: golang:1.25-bookworm
+# - ビルド: golang:1.26-bookworm
 # - 実行: gcr.io/distroless/static-debian12:nonroot
 # - arm64 / static binary / read-only root filesystem 想定
 #
 # /var/data は ECS タスクの volume mount で attach される (S3 Files NFS)。
 
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
 
